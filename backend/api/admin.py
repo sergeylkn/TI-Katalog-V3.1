@@ -109,3 +109,21 @@ async def clear_database(db: AsyncSession = Depends(get_db)):
 @router.get("/cache-stats")
 async def cache_stats():
     return {"cache": "disabled", "note": "lightweight mode"}
+
+
+@router.get("/env-status")
+async def env_status():
+    """Check status of all required environment variables."""
+    def _check(key: str):
+        val = os.getenv(key, "")
+        return {
+            "active": bool(val),
+            "source": "railway" if val else "missing",
+            "preview": f"{val[:4]}…{val[-4:]}" if len(val) > 10 else ("✓" if val else ""),
+        }
+    return {
+        "ANTHROPIC_API_KEY": _check("ANTHROPIC_API_KEY"),
+        "OPENAI_API_KEY":    _check("OPENAI_API_KEY"),
+        "DATABASE_URL":      _check("DATABASE_URL"),
+        "PORT":              _check("PORT"),
+    }

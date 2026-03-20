@@ -80,4 +80,5 @@ export const api = {
   importLogs:   (n = 50) => req<any>(`/api/admin/import-logs?limit=${n}`),
   parseLogs:    (n = 50) => req<any>(`/api/admin/parse-logs?limit=${n}`),
   clearDatabase: () => req<any>('/api/admin/clear-database', { method: 'POST' }),
+  envStatus:    () => req<any>('/api/admin/env-status'),
 }
