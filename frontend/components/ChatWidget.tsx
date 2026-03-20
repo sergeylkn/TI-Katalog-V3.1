@@ -18,7 +18,7 @@ interface Msg {
 const QUICK = [
   'Шланг для харчових продуктів',
   'Гідравлічний шланг 200 bar',
-  'Camlock з'єднання нержавійка',
+  'Camlock з\u2019єднання нержавійка',
   'Кульовий кран DN50',
   'Пневматичний шланг 8мм',
 ]
@@ -71,7 +71,7 @@ export default function ChatWidget() {
         params: data.params_detected || {},
       }])
     } catch {
-      setMsgs(prev => [...prev, { role: 'assistant', content: '❌ Помилка з\'єднання. Спробуйте ще раз.' }])
+      setMsgs(prev => [...prev, { role: 'assistant', content: "❌ Помилка з'єднання. Спробуйте ще раз." }])
     } finally {
       setLoading(false)
     }
