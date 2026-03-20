@@ -22,11 +22,60 @@ PL_MAP = {
     "obejma":"хомут clamp", "uszczelnienie":"ущільнення seal",
 }
 
+# Ukrainian/Russian colloquial → standard terms
+UA_NORMALIZE = {
+    # "дн" variants → DN
+    " дн ": " DN ", " дн.": " DN", "дн-": "DN-",
+    # Common misspellings / short forms
+    "гідравл ": "гідравлічний ", "пневмат ": "пневматичний ",
+    "харч ": "харчовий ", "хім ": "хімічний ",
+    # Category keywords that help narrow search
+    "рукав": "шланг рукав",
+}
+
+# Category-specific search terms to BOOST correct category
+CATEGORY_HINTS = {
+    "шланг": ["шланг", "рукав", "hose", "wąż"],
+    "шланги": ["шланг", "рукав", "hose"],
+    "рукав": ["шланг", "рукав", "hose"],
+    "hose": ["шланг", "рукав", "hose"],
+    "кран": ["кран", "клапан", "кульовий"],
+    "клапан": ["клапан", "кран", "valve"],
+    "фітинг": ["фітинг", "з'єднання", "fitting"],
+    "з'єднання": ["з'єднання", "фітинг", "coupling"],
+    "арматура": ["арматура", "з'єднання", "fitting"],
+    "манометр": ["манометр", "тиск", "pressure"],
+    "хомут": ["хомут", "обойма", "clamp"],
+}
+
+def _normalize_query(q: str) -> str:
+    """Normalize Ukrainian colloquial terms and expand synonyms."""
+    result = q
+    q_l = q.lower()
+    # Fix дн/ДН → DN
+    import re
+    result = re.sub(r'\bдн\s*(\d+)\b', lambda m: f'DN{m.group(1)}', result, flags=re.I)
+    result = re.sub(r'\bдн\b', 'DN', result, flags=re.I)
+    # Apply UA normalizations
+    for orig, repl in UA_NORMALIZE.items():
+        result = result.replace(orig, repl)
+    return result
+
 def _expand(q: str) -> str:
-    r = q
+    result = _normalize_query(q)
+    q_l = q.lower()
+    # Polish expansion
     for pl, ua in PL_MAP.items():
-        if pl in q.lower(): r += " " + ua
-    return r
+        if pl in q_l: result += " " + ua
+    return result
+
+def _get_category_boost(q: str) -> list:
+    """Return terms that should boost matching by category."""
+    q_l = q.lower()
+    for kw, terms in CATEGORY_HINTS.items():
+        if kw in q_l:
+            return terms
+    return []
 
 def _params(q: str) -> dict:
     """
@@ -103,7 +152,7 @@ async def _vec(q: str, n: int = 40) -> List[int]:
             return [row[0] for row in res.fetchall()]
     except: return []
 
-def _score(p: Product, q_lower: str, par: dict, vec_ids: List[int]) -> int:
+def _score(p: Product, q_lower: str, par: dict, vec_ids: List[int], cat_hints: list = None) -> int:
     s = 0
     title = (p.title or "").lower()
     sku   = (p.sku or "").lower()
@@ -111,6 +160,14 @@ def _score(p: Product, q_lower: str, par: dict, vec_ids: List[int]) -> int:
     desc  = (p.description or "").lower()
     attrs = str(p.attributes or {}).lower()
     alltext = f"{title} {sku} {srch} {desc} {attrs}"
+
+    # Category hint boost — if user asked for "шланг", reward products with "шланг" in title
+    if cat_hints:
+        cat_matches = sum(1 for hint in cat_hints if hint in title)
+        if cat_matches > 0:
+            s += cat_matches * 40  # strong boost for correct category
+        else:
+            s -= 30  # penalize wrong category (e.g. fitting when user asked for hose)
 
     # SKU
     q_sku = par.get("sku","").lower()
@@ -243,8 +300,9 @@ async def search(
         all_ids = {i:s for i,s in all_ids.items() if i in all_prods}
 
     # Score & sort
+    cat_hints = _get_category_boost(q_clean)
     scored = sorted(
-        [(all_prods[i], _score(all_prods[i], q_lower, par, vec_ids) + all_ids.get(i,0))
+        [(all_prods[i], _score(all_prods[i], q_lower, par, vec_ids, cat_hints) + all_ids.get(i,0))
          for i in all_prods],
         key=lambda x: -x[1]
     )

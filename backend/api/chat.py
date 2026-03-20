@@ -125,7 +125,11 @@ def _extract_tech_params(q: str) -> dict:
     if m := re.search(r'([+-]?\d+)\s*°?\s*[Cc]', q):
         params["temp_c"] = int(m.group(1))
 
-    # DN explicitly
+    # Normalize дн/ДН → DN first
+    q = re.sub(r'\bдн\s*(\d+)\b', lambda m: f'DN{m.group(1)}', q, flags=re.I)
+    q = re.sub(r'\bдн\b', 'DN', q, flags=re.I)
+
+    # DN (after normalization)
     if m := re.search(r'\bDN\s*?(\d+)\b', q, re.I):
         params["dn"] = int(m.group(1))
         params["d_inner"] = int(m.group(1))

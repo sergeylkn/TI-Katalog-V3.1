@@ -278,34 +278,59 @@ export default function AdminPage() {
 
         {/* ── LOGS ── */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
-          {[
-            { title: 'Лог імпорту', items: logs, keyField: 'doc', msgField: 'msg', errField: 'status', errVal: 'error' },
-            { title: 'Лог парсингу', items: parseLogs, keyField: 'doc_id', msgField: 'msg', errField: 'level', errVal: 'error' },
-          ].map(({ title, items, msgField, errField, errVal }) => (
-            <div key={title} className="card">
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-                <h3 style={{ fontFamily: 'var(--font-serif)', fontSize: 18 }}>{title}</h3>
-                <span style={{ fontSize: 11, color: 'var(--text3)' }}>{items.length} записів</span>
-              </div>
-              <div style={{ maxHeight: 280, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 3 }}>
-                {items.length === 0 ? (
-                  <p style={{ fontSize: 12, color: 'var(--text3)', textAlign: 'center', padding: '20px 0' }}>
-                    Логів немає
-                  </p>
-                ) : items.slice().reverse().map((l: any, i: number) => (
-                  <div key={i} style={{
-                    fontSize: 11, fontFamily: 'var(--font-mono)',
-                    padding: '4px 8px', borderRadius: 4,
-                    background: l[errField] === errVal ? 'rgba(163,45,45,.08)' : 'var(--bg2)',
-                    color: l[errField] === errVal ? '#A32D2D' : 'var(--text2)',
-                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                  }} title={(l[msgField] || '')}>
-                    {l[msgField]?.slice(0, 90) || '—'}
-                  </div>
-                ))}
-              </div>
+          {/* Import logs */}
+          <div className="card">
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+              <h3 style={{ fontFamily: "var(--font-serif)", fontSize: 18 }}>Лог імпорту</h3>
+              <span style={{ fontSize: 11, color: "var(--text3)" }}>{logs.length} записів</span>
             </div>
-          ))}
+            <div style={{ maxHeight: 280, overflowY: "auto", display: "flex", flexDirection: "column", gap: 3 }}>
+              {logs.length === 0 ? (
+                <p style={{ fontSize: 12, color: "var(--text3)", textAlign: "center", padding: "20px 0" }}>Логів немає</p>
+              ) : logs.slice().reverse().map((l: any, i: number) => {
+                const isErr = l.status === "error"
+                const text = [l.doc, l.msg].filter(Boolean).join(" — ")
+                return (
+                  <div key={i} style={{
+                    fontSize: 11, fontFamily: "var(--font-mono)",
+                    padding: "4px 8px", borderRadius: 4,
+                    background: isErr ? "rgba(163,45,45,.08)" : "var(--bg2)",
+                    color: isErr ? "#A32D2D" : "var(--text2)",
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                  }} title={text}>
+                    {isErr ? "❌ " : ""}{text.slice(0, 90) || "—"}
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+
+          {/* Parse logs */}
+          <div className="card">
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+              <h3 style={{ fontFamily: "var(--font-serif)", fontSize: 18 }}>Лог парсингу</h3>
+              <span style={{ fontSize: 11, color: "var(--text3)" }}>{parseLogs.length} записів</span>
+            </div>
+            <div style={{ maxHeight: 280, overflowY: "auto", display: "flex", flexDirection: "column", gap: 3 }}>
+              {parseLogs.length === 0 ? (
+                <p style={{ fontSize: 12, color: "var(--text3)", textAlign: "center", padding: "20px 0" }}>Логів немає</p>
+              ) : parseLogs.slice().reverse().map((l: any, i: number) => {
+                const isErr = l.level === "error"
+                const text = l.msg || l.message || ""
+                return (
+                  <div key={i} style={{
+                    fontSize: 11, fontFamily: "var(--font-mono)",
+                    padding: "4px 8px", borderRadius: 4,
+                    background: isErr ? "rgba(163,45,45,.08)" : "var(--bg2)",
+                    color: isErr ? "#A32D2D" : "var(--text2)",
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                  }} title={text}>
+                    {isErr ? "❌ " : "✅ "}{text.slice(0, 90) || "—"}
+                  </div>
+                )
+              })}
+            </div>
+          </div>
         </div>
 
       </div>

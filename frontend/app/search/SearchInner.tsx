@@ -1,5 +1,5 @@
 'use client'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import Navbar from '@/components/Navbar'
@@ -7,46 +7,70 @@ import ProductCard from '@/components/ProductCard'
 import ChatWidget from '@/components/ChatWidget'
 import { api, type SearchResult } from '@/lib/api'
 
+const PAGE_SIZE = 20
+
 export default function SearchInner() {
   const searchParams = useSearchParams()
   const router = useRouter()
   const q = searchParams.get('q') || ''
-  const [results, setResults] = useState<SearchResult[]>([])
-  const [total, setTotal] = useState(0)
-  const [loading, setLoading] = useState(false)
-  const [vectorUsed, setVectorUsed] = useState(false)
-  const [paramsDetected, setParamsDetected] = useState<any>({})
-  const [inputQ, setInputQ] = useState(q)
-  const [page, setPage] = useState(1)
-  const PAGE_SIZE = 20
 
+  const [results, setResults]           = useState<SearchResult[]>([])
+  const [total, setTotal]               = useState(0)
+  const [loading, setLoading]           = useState(false)
+  const [vectorUsed, setVectorUsed]     = useState(false)
+  const [paramsDetected, setParams]     = useState<any>({})
+  const [inputQ, setInputQ]             = useState(q)
+  const [page, setPage]                 = useState(1)
+
+  // Reset to page 1 when query changes
   useEffect(() => {
     setInputQ(q)
-    if (!q) return
-    setLoading(true)
     setPage(1)
-    api.search(q, 1, PAGE_SIZE)
+  }, [q])
+
+  // Fetch when query OR page changes
+  useEffect(() => {
+    if (!q) { setResults([]); setTotal(0); return }
+    setLoading(true)
+    api.search(q, page, PAGE_SIZE)
       .then(r => {
         setResults(r.items)
         setTotal(r.total)
         setVectorUsed(r.vector_used)
-        setParamsDetected(r.params_detected || {})
+        setParams(r.params_detected || {})
+        // Scroll to top of results
+        window.scrollTo({ top: 0, behavior: 'smooth' })
       })
       .catch(() => setResults([]))
       .finally(() => setLoading(false))
-  }, [q])
+  }, [q, page])  // ← both q AND page trigger fetch
 
   const doSearch = (e: React.FormEvent) => {
     e.preventDefault()
-    if (inputQ.trim()) router.push(`/search?q=${encodeURIComponent(inputQ.trim())}`)
+    if (inputQ.trim()) {
+      setPage(1)
+      router.push(`/search?q=${encodeURIComponent(inputQ.trim())}`)
+    }
   }
 
+  const totalPages = Math.ceil(total / PAGE_SIZE)
   const hasParams = Object.keys(paramsDetected).length > 0
+
+  // Page number range to show
+  const pageNums = () => {
+    const nums = []
+    const start = Math.max(1, page - 2)
+    const end   = Math.min(totalPages, page + 2)
+    for (let i = start; i <= end; i++) nums.push(i)
+    return nums
+  }
 
   return (
     <>
       <Navbar />
       <div className="container" style={{ paddingTop: 24, paddingBottom: 48 }}>
+
+        {/* Search bar */}
         <form onSubmit={doSearch} style={{ display: 'flex', gap: 10, marginBottom: 20 }}>
           <input
             value={inputQ}
@@ -62,10 +86,16 @@ export default function SearchInner() {
           <button type="submit" className="btn btn-primary">Знайти</button>
         </form>
 
+        {/* Status bar */}
         {q && !loading && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
             <span style={{ fontSize: 14, color: 'var(--text2)' }}>
               <strong style={{ color: 'var(--text)' }}>{total}</strong> результатів для «{q}»
+              {totalPages > 1 && (
+                <span style={{ marginLeft: 8, color: 'var(--text3)' }}>
+                  · сторінка {page} з {totalPages}
+                </span>
+              )}
             </span>
             {vectorUsed && (
               <span style={{ fontSize: 11, background: '#E6F1FB', color: '#185FA5', padding: '2px 8px', borderRadius: 4, fontWeight: 600 }}>
@@ -80,6 +110,7 @@ export default function SearchInner() {
           </div>
         )}
 
+        {/* Results */}
         {loading ? (
           <div className="loader-wrap" style={{ minHeight: 300 }}><div className="spinner" /></div>
         ) : !q ? (
@@ -89,7 +120,9 @@ export default function SearchInner() {
         ) : results.length === 0 ? (
           <div style={{ textAlign: 'center', padding: '60px 0' }}>
             <p style={{ fontSize: 18, color: 'var(--text2)', marginBottom: 8 }}>Нічого не знайдено</p>
-            <p style={{ fontSize: 14, color: 'var(--text3)', marginBottom: 24 }}>Спробуйте інший запит або перегляньте каталог</p>
+            <p style={{ fontSize: 14, color: 'var(--text3)', marginBottom: 24 }}>
+              Спробуйте змінити запит або перегляньте каталог
+            </p>
             <Link href="/" className="btn btn-ghost">← До каталогу</Link>
           </div>
         ) : (
@@ -108,13 +141,43 @@ export default function SearchInner() {
                 </div>
               ))}
             </div>
-            {total > PAGE_SIZE && (
-              <div className="pagination" style={{ marginTop: 32 }}>
-                <button className="page-btn" disabled={page === 1} onClick={() => setPage(p => p - 1)}>◀</button>
-                <span style={{ fontSize: 13, color: 'var(--text2)', padding: '0 12px' }}>
-                  Стор. {page} з {Math.ceil(total / PAGE_SIZE)}
-                </span>
-                <button className="page-btn" disabled={page >= Math.ceil(total / PAGE_SIZE)} onClick={() => setPage(p => p + 1)}>▶</button>
+
+            {/* Pagination */}
+            {totalPages > 1 && (
+              <div className="pagination" style={{ marginTop: 32, marginBottom: 16 }}>
+                <button
+                  className="page-btn"
+                  disabled={page === 1}
+                  onClick={() => setPage(p => p - 1)}
+                >◀</button>
+
+                {page > 3 && (
+                  <>
+                    <button className="page-btn" onClick={() => setPage(1)}>1</button>
+                    {page > 4 && <span style={{ padding: '0 4px', color: 'var(--text3)' }}>…</span>}
+                  </>
+                )}
+
+                {pageNums().map(n => (
+                  <button
+                    key={n}
+                    className={`page-btn ${n === page ? 'active' : ''}`}
+                    onClick={() => setPage(n)}
+                  >{n}</button>
+                ))}
+
+                {page < totalPages - 2 && (
+                  <>
+                    {page < totalPages - 3 && <span style={{ padding: '0 4px', color: 'var(--text3)' }}>…</span>}
+                    <button className="page-btn" onClick={() => setPage(totalPages)}>{totalPages}</button>
+                  </>
+                )}
+
+                <button
+                  className="page-btn"
+                  disabled={page >= totalPages}
+                  onClick={() => setPage(p => p + 1)}
+                >▶</button>
               </div>
             )}
           </>
