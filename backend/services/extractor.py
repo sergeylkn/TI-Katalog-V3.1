@@ -1,9 +1,9 @@
 """
-PDF Extractor v5 — Pure regex, $0 import cost.
-- Extracts products with image_bbox, variants, full attributes
-- Builds search_text for hybrid search
-- Optional: OpenAI embeddings after save
-- Updates section.full_text as RAG knowledge base
+PDF Extractor v5.2
+- Pure regex, $0 import cost
+- Normalized technical attributes (bar, DN, temp, diameter)
+- Rich search_text with all searchable values
+- OpenAI embeddings after save
 """
 import asyncio
 import logging
@@ -19,12 +19,12 @@ try:
 except ImportError:
     _FITZ = False
 
-# ── Spec key-value labels ─────────────────────────────────────────────────────
+# ── Labels to search for in PDF text ──────────────────────────────────────────
 SPEC_LABELS = [
-    "Матеріал шлангу", "Внутрішній шар", "Зовнішній шар",
-    "Армування", "Робоча темп", "Робоча температура",
-    "Температура", "Матеріал", "Середній шар",
-    "Тиск", "Робочий тиск", "Вакуум",
+    "Матеріал шлангу", "Внутрішній шар", "Зовнішній шар", "Середній шар",
+    "Армування", "Робоча температура", "Робоча темп", "Температура",
+    "Матеріал", "Тиск", "Робочий тиск", "Вакуум", "Застосування",
+    "Стандарт", "Колір", "Довжина", "Маса", "Вага",
 ]
 
 SKU_PATTERN = re.compile(r'\b([A-Z]{2,6}[-_][A-Z0-9][-A-Z0-9/]{3,30})\b')
@@ -34,9 +34,114 @@ CERT_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+# ── Technical value extraction patterns ───────────────────────────────────────
+# bar/pressure
+_BAR_RE   = re.compile(r'(\d+[\.,]?\d*)\s*(?:bar|BAR|бар|MPa)', re.I)
+# temperature ranges like "-20°C do +60°C" or "-20 +60"
+_TEMP_RE  = re.compile(r'([+-]?\d+)\s*°?\s*[Cc°]\s*(?:do|до|[+~–-])\s*([+-]?\d+)\s*°?\s*[Cc°]', re.I)
+_TEMP1_RE = re.compile(r'(?:до|до\s*\+?|max\.?\s*)([+-]?\d+)\s*°?\s*[Cc]', re.I)
+# DN
+_DN_RE    = re.compile(r'\bDN\s*(\d+)\b', re.I)
+# diameter inner x outer: 25x35 or 25/35 mm
+_DIAM_RE  = re.compile(r'\b(\d+[\.,]?\d*)\s*[xX×]\s*(\d+[\.,]?\d*)\s*mm', re.I)
+_DIAM1_RE = re.compile(r'\bø?\s*(\d+[\.,]?\d*)\s*mm\b', re.I)
 
-# ── OpenAI embedding (optional) ───────────────────────────────────────────────
 
+def _normalize_attrs(raw_attrs: Dict[str, str], full_text: str) -> Dict[str, str]:
+    """
+    Enhance raw attributes with normalized technical values extracted from full page text.
+    Always adds: bar, temp_min, temp_max, dn, d_inner, d_outer where found.
+    """
+    attrs = dict(raw_attrs)
+
+    # Pressure in bar
+    bars = _BAR_RE.findall(full_text)
+    if bars:
+        # Take the most common / largest reasonable value
+        bar_vals = [float(b.replace(",", ".")) for b in bars if float(b.replace(",","."))<1000]
+        if bar_vals:
+            attrs["Тиск_бар"] = str(max(bar_vals))
+
+    # Temperature range
+    m = _TEMP_RE.search(full_text)
+    if m:
+        attrs["Темп_мін"] = m.group(1)
+        attrs["Темп_макс"] = m.group(2)
+    else:
+        m1 = _TEMP1_RE.search(full_text)
+        if m1:
+            attrs["Темп_макс"] = m1.group(1)
+
+    # DN = Номінальний діаметр = внутрішній діаметр шланга
+    dns = _DN_RE.findall(full_text)
+    if dns:
+        attrs["DN"] = dns[0]
+        attrs["d_вн_мм"] = dns[0]   # DN = внутрішній діаметр
+
+    # Explicit inner x outer diameters e.g. 25x35mm
+    m = _DIAM_RE.search(full_text)
+    if m:
+        attrs["d_вн_мм"]  = m.group(1)   # inner = left number
+        attrs["d_зовн_мм"] = m.group(2)   # outer = right number
+        if not attrs.get("DN"):
+            attrs["DN"] = m.group(1)       # DN ≈ inner diameter
+    else:
+        diams = _DIAM1_RE.findall(full_text)
+        if diams and not attrs.get("d_вн_мм"):
+            attrs["d_вн_мм"] = diams[0]
+
+    return attrs
+
+
+def _build_search_text(title, subtitle, sku, attrs, variants, description, full_text="") -> str:
+    """
+    Denormalized searchable text. Includes:
+    - All title/subtitle/sku
+    - All attribute values (including normalized bar/DN/temp)
+    - All variant SKUs and key values
+    - Key numbers extracted from description
+    """
+    parts = [title or ""]
+    if subtitle:  parts.append(subtitle)
+    if sku:       parts.append(sku)
+
+    # All attribute values
+    for k, v in (attrs or {}).items():
+        parts.append(f"{k} {v}")
+
+    # Variant SKUs and diameters
+    for var in (variants or []):
+        vsku = var.get("_sku") or var.get("Індекс") or var.get("Indeks", "")
+        if vsku: parts.append(vsku)
+        # Add numeric values from variants — inner diameter gets extra weight
+        for vk, vv in var.items():
+            if vk == "_sku": continue
+            if vv and re.search(r'\d', str(vv)):
+                parts.append(str(vv))
+                # If looks like inner diameter column
+                vk_l = vk.lower()
+                if any(x in vk_l for x in ("вн", "inner", "d_в", "dn", "id", "di")):
+                    parts.append(f"DN{vv} {vv}мм {vv}mm")
+
+    if description: parts.append(description[:800])
+
+    # Add key numeric patterns from full page text
+    if full_text:
+        # Extract all bar values
+        for b in _BAR_RE.findall(full_text):
+            parts.append(f"{b} bar бар")
+        # DN = внутрішній діаметр — додаємо всі варіанти написання
+        for d in _DN_RE.findall(full_text):
+            parts.append(f"DN{d} DN {d} {d}мм {d}mm внутрішній діаметр {d}")
+        # Temperature
+        m = _TEMP_RE.search(full_text)
+        if m:
+            parts.append(f"{m.group(1)}°C {m.group(2)}°C температура")
+
+    return " | ".join(filter(None, parts))[:10000]
+
+
+# ── OpenAI embedding ──────────────────────────────────────────────────────────
 async def _get_embedding(text: str) -> Optional[List[float]]:
     key = os.getenv("OPENAI_API_KEY", "")
     if not key or not text:
@@ -56,8 +161,7 @@ async def _get_embedding(text: str) -> Optional[List[float]]:
     return None
 
 
-# ── PDF helpers ───────────────────────────────────────────────────────────────
-
+# ── PDF page helpers ──────────────────────────────────────────────────────────
 def _get_spans(page) -> List[Dict]:
     spans = []
     for block in page.get_text("dict")["blocks"]:
@@ -76,7 +180,6 @@ def _get_spans(page) -> List[Dict]:
 
 
 def _find_product_image(page) -> Optional[Dict]:
-    """Find largest product photo (left half, medium size)."""
     best, best_area = None, 0
     for img in page.get_images(full=True):
         try:
@@ -95,22 +198,24 @@ def _find_product_image(page) -> Optional[Dict]:
     return best
 
 
+SKIP_TITLES = {"www.", "tubes-international", "Шланги для промисловості",
+               "Силова гідравліка", "Промислова арматура", "ПРОМИСЛОВА АРМАТУРА",
+               "Пневматика", "ПНЕВМАТИКА", "TI-Katalog"}
+
+
 def _find_model_name(spans: List[Dict]) -> Optional[str]:
-    skip = {"www.", "tubes-international", "Шланги для промисловості",
-            "Шланги промислові", "Шланги універсальні", "Силова гідравліка",
-            "Промислова арматура", "Пневматика"}
     candidates = []
     for s in spans:
         t = s["text"].strip()
-        if len(t) < 2 or len(t) > 80:
+        if len(t) < 2 or len(t) > 100:
             continue
-        if any(sk in t for sk in skip):
+        if any(sk in t for sk in SKIP_TITLES):
             continue
         upper_ratio = sum(1 for c in t if c.isupper()) / max(len(t), 1)
         score = 0
-        if s["size"] >= 12: score += 3
-        if s["bold"]:        score += 2
-        if upper_ratio > 0.4: score += 2
+        if s["size"] >= 12:  score += 3
+        if s["bold"]:         score += 2
+        if upper_ratio > 0.3: score += 2
         if re.search(r'[A-Z]{3}', t): score += 1
         if score >= 4:
             candidates.append((score, s["bbox"][1], t))
@@ -151,44 +256,37 @@ def _extract_specs(spans: List[Dict]) -> Dict[str, str]:
 
 
 def _extract_description(spans: List[Dict]) -> str:
-    lines = []
-    seen = set()
+    lines, seen = [], set()
     for s in spans:
         t = s["text"].strip()
-        if len(t) < 20:
-            continue
-        if any(sk in t for sk in ["www.", "tubes-international"]):
-            continue
+        if len(t) < 20: continue
+        if any(sk in t for sk in ["www.", "tubes-international"]): continue
         digit_ratio = sum(1 for c in t if c.isdigit()) / len(t)
-        if digit_ratio > 0.4:
-            continue
+        if digit_ratio > 0.4: continue
         if 7 <= s["size"] <= 12:
             key = t[:40]
             if key not in seen:
-                seen.add(key)
-                lines.append(t)
+                seen.add(key); lines.append(t)
     return " ".join(lines)[:4000]
 
 
 def _extract_certifications(spans: List[Dict]) -> Optional[str]:
     full = " ".join(s["text"] for s in spans)
     matches = CERT_PATTERN.findall(full)
-    if not matches:
-        return None
+    if not matches: return None
     return max(matches, key=len)[:600]
 
 
 def _extract_variants(page) -> List[Dict]:
     variants = []
     try:
+        import pandas as pd
         tabs = page.find_tables()
         for tab in tabs.tables:
             df = tab.to_pandas()
-            if df is None or df.empty:
-                continue
+            if df is None or df.empty: continue
             first_col = df.iloc[:, 0].astype(str)
-            if not first_col.str.match(r'[A-Z]{2,}[-_]').any():
-                continue
+            if not first_col.str.match(r'[A-Z]{2,}[-_]').any(): continue
             headers = [str(c).strip() for c in df.columns]
             for _, row in df.iterrows():
                 variant = {}
@@ -206,27 +304,7 @@ def _extract_variants(page) -> List[Dict]:
     return variants[:200]
 
 
-def _build_search_text(title, subtitle, sku, attrs, variants, description) -> str:
-    """Denormalized text for FTS and vector search."""
-    parts = [title or ""]
-    if subtitle:
-        parts.append(subtitle)
-    if sku:
-        parts.append(sku)
-    for v, k in attrs.items():
-        parts.append(f"{v} {k}")
-    # Add all variant SKUs
-    for var in (variants or []):
-        vsku = var.get("_sku") or var.get("Індекс") or var.get("indeks", "")
-        if vsku:
-            parts.append(vsku)
-    if description:
-        parts.append(description[:500])
-    return " | ".join(filter(None, parts))[:8000]
-
-
 # ── Main extraction ───────────────────────────────────────────────────────────
-
 async def extract_products(
     pdf_bytes: bytes,
     document_id: int,
@@ -259,14 +337,17 @@ async def extract_products(
         if not model_name:
             continue
 
-        image_bbox = _find_product_image(page)
-        subtitle = _find_subtitle(spans, model_name)
-        specs = _extract_specs(spans)
-        description = _extract_description(spans)
+        image_bbox    = _find_product_image(page)
+        subtitle      = _find_subtitle(spans, model_name)
+        raw_specs     = _extract_specs(spans)
+        description   = _extract_description(spans)
         certifications = _extract_certifications(spans)
-        variants = _extract_variants(page)
+        variants      = _extract_variants(page)
 
-        # SKU from first variant or text scan
+        # Normalize with full page text for bar/DN/temp
+        attrs = _normalize_attrs(raw_specs, page_raw)
+
+        # SKU
         sku = None
         if variants:
             sku = variants[0].get("_sku") or variants[0].get("Індекс")
@@ -275,10 +356,9 @@ async def extract_products(
             sku = m.group(1) if m else None
 
         search_text = _build_search_text(
-            model_name, subtitle, sku, specs, variants, description
+            model_name, subtitle, sku, attrs, variants, description, page_raw
         )
 
-        # Optional embedding
         embedding = await _get_embedding(search_text[:2000])
 
         prod_data = dict(
@@ -287,7 +367,7 @@ async def extract_products(
             sku=(sku or "")[:128],
             description=description,
             certifications=certifications,
-            attributes=specs,
+            attributes=attrs,
             variants=variants,
             search_text=search_text,
             image_bbox=image_bbox,
@@ -304,7 +384,6 @@ async def extract_products(
                 await db.commit()
                 await db.refresh(prod)
 
-                # Store embedding in separate table if pgvector available
                 if embedding:
                     try:
                         await db.execute(
@@ -315,13 +394,14 @@ async def extract_products(
                         )
                         await db.commit()
                     except Exception:
-                        pass  # pgvector not available yet
+                        pass
 
                 saved.append(prod)
                 logger.info(
                     f"Doc#{document_id} p{pnum}: '{model_name}' "
-                    f"{len(variants)} variants, "
-                    f"img={'✓' if image_bbox else '✗'}, "
+                    f"attrs={list(attrs.keys())[:4]} "
+                    f"variants={len(variants)} "
+                    f"img={'✓' if image_bbox else '✗'} "
                     f"emb={'✓' if embedding else '✗'}"
                 )
         except Exception as e:
@@ -329,7 +409,7 @@ async def extract_products(
 
     doc.close()
 
-    # Update section full_text (RAG knowledge base)
+    # Update section full_text
     if all_page_text and section_id:
         full = "\n\n".join(all_page_text)[:50000]
         try:
@@ -337,10 +417,8 @@ async def extract_products(
                 sec = await db.get(Section, section_id)
                 if sec and not sec.full_text:
                     sec.full_text = full
-                    # Extract description from first 2 pages
-                    intro = "\n".join(all_page_text[:2])[:1000]
                     if not sec.description:
-                        sec.description = intro
+                        sec.description = "\n".join(all_page_text[:2])[:1000]
                     await db.commit()
         except Exception as e:
             logger.debug(f"Section full_text: {e}")

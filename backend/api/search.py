@@ -1,14 +1,10 @@
 """
-Hybrid Search v5 — SKU exact + pgvector semantic + PostgreSQL FTS + ILIKE.
-No AI calls per query → $0/month.
-Supports Ukrainian, Polish, English queries.
+Search v5.2 — розуміє технічні параметри: bar, DN, °C, mm.
 """
-import logging
-import os
-import re
+import logging, os, re, json
 from typing import Optional, List
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select, or_, text, func
+from sqlalchemy import select, or_, and_, text, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from core.database import get_db
 from models.models import Product, Document
@@ -16,108 +12,143 @@ from models.models import Product, Document
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# ── Technical parameter regex ─────────────────────────────────────────────────
-_DN_RE    = re.compile(r'\bDN\s*(\d+)\b', re.I)
-_BAR_RE   = re.compile(r'(\d+[\.,]?\d*)\s*bar\b', re.I)
-_TEMP_RE  = re.compile(r'([+-]?\d+)\s*°?\s*[CcС]', re.I)
-_DIAM_RE  = re.compile(r'\b(\d+[\.,]?\d*)\s*mm\b', re.I)
-_SKU_RE   = re.compile(r'\b([A-Z]{2,6}[-_][A-Z0-9][-A-Z0-9/]{3,30})\b')
+PL_MAP = {
+    "wąż":"шланг hose", "węże":"шланги hoses", "przewód":"шланг труба",
+    "złącze":"з'єднання фітинг", "zawór":"клапан кран", "armatura":"арматура",
+    "hydrauliczny":"гідравлічний", "pneumatyczny":"пневматичний",
+    "spożywczy":"харчовий food", "chemiczny":"хімічний",
+    "gumowy":"гумовий rubber", "silikonowy":"силіконовий silicone",
+    "ciśnienie":"тиск pressure bar", "temperatura":"температура temperature",
+    "obejma":"хомут clamp", "uszczelnienie":"ущільнення seal",
+}
 
+def _expand(q: str) -> str:
+    r = q
+    for pl, ua in PL_MAP.items():
+        if pl in q.lower(): r += " " + ua
+    return r
 
-def _parse_params(q: str) -> dict:
-    params = {}
-    if m := _DN_RE.search(q):    params["dn"] = m.group(1)
-    if m := _BAR_RE.search(q):   params["bar"] = m.group(1).replace(",", ".")
-    if m := _TEMP_RE.search(q):  params["temp"] = m.group(1)
-    if m := _DIAM_RE.search(q):  params["mm"] = m.group(1).replace(",", ".")
-    if m := _SKU_RE.search(q.upper()): params["sku"] = m.group(1)
-    return params
+def _params(q: str) -> dict:
+    """
+    Extract technical params from query.
+    DN = номінальний діаметр = внутрішній діаметр шланга.
+    Розуміє: DN65, 65мм, 65mm, 25x35, шланг 65
+    """
+    p = {}
+    qu = q.upper()
 
+    # SKU first (before other number patterns)
+    if m := re.search(r'\b([A-Z]{2,8}[-][A-Z0-9][-A-Z0-9/\.]{2,30})\b', qu):
+        p["sku"] = m.group(1)
 
-async def _vector_search(q: str, limit: int = 20) -> List[int]:
-    """Return product IDs via pgvector cosine similarity."""
-    key = os.getenv("OPENAI_API_KEY", "")
-    if not key:
-        return []
+    # Pressure bar/бар
+    if m := re.search(r'(\d+[\.,]?\d*)\s*(?:bar|бар|BAR|БАР)\b', q, re.I):
+        p["bar"] = m.group(1).replace(",",".")
+
+    # Temperature °C
+    if m := re.search(r'([+-]?\d+)\s*°?\s*[Cc]', q):
+        p["temp"] = m.group(1)
+
+    # DN explicitly written
+    if m := re.search(r'\bDN\s*?(\d+)\b', q, re.I):
+        p["dn"] = m.group(1)
+        p["d_inner"] = m.group(1)   # DN = внутрішній діаметр
+
+    # Inner x outer: 25x35mm or 25/35
+    if m := re.search(r'\b(\d+)\s*[xX×/]\s*(\d+)\s*(?:mm|мм)?\b', q):
+        p["d_inner"] = m.group(1)
+        p["d_outer"] = m.group(2)
+        if not p.get("dn"):
+            p["dn"] = m.group(1)    # inner = DN
+
+    # Standalone mm — likely inner diameter if no DN yet
+    if not p.get("dn"):
+        if m := re.search(r'\b(\d+)\s*(?:mm|мм)\b', q, re.I):
+            val = m.group(1)
+            # Reasonable hose diameter: 4-400mm
+            if 4 <= int(val) <= 400:
+                p["dn"] = val
+                p["d_inner"] = val
+
+    # Standalone number after key words like "шланг 65" "шланг DN 65"
+    if not p.get("dn"):
+        kw = ["шланг", "hose", "wąż", "труб", "pipe", "арматур", "кран", "valve"]
+        for k in kw:
+            if k in q.lower():
+                if m := re.search(r'\b(\d{2,3})\b', q):
+                    val = m.group(1)
+                    if 4 <= int(val) <= 400 and val != p.get("bar","").split(".")[0]:
+                        p["dn"] = val
+                        p["d_inner"] = val
+                        break
+
+    return p
+
+async def _vec(q: str, n: int = 40) -> List[int]:
+    key = os.getenv("OPENAI_API_KEY","")
+    if not key: return []
     try:
         import httpx
         async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.post(
-                "https://api.openai.com/v1/embeddings",
-                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json={"model": "text-embedding-3-small", "input": q[:2000]}
-            )
-            if r.status_code != 200:
-                return []
+            r = await c.post("https://api.openai.com/v1/embeddings",
+                headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"},
+                json={"model":"text-embedding-3-small","input":q[:2000]})
+            if r.status_code!=200: return []
             emb = r.json()["data"][0]["embedding"]
-
         from core.database import engine
         async with engine.connect() as conn:
-            result = await conn.execute(
-                text("""
-                    SELECT id FROM products
-                    WHERE embedding IS NOT NULL
-                    ORDER BY embedding <=> :emb::vector
-                    LIMIT :lim
-                """),
-                {"emb": str(emb), "lim": limit}
-            )
-            return [row[0] for row in result.fetchall()]
-    except Exception as e:
-        logger.debug(f"Vector search: {e}")
-        return []
+            res = await conn.execute(
+                text("SELECT id FROM products WHERE embedding IS NOT NULL ORDER BY embedding <=> :e::vector LIMIT :l"),
+                {"e":str(emb),"l":n})
+            return [row[0] for row in res.fetchall()]
+    except: return []
 
-
-def _score_product(p: Product, q_lower: str, params: dict, vector_ids: List[int]) -> int:
-    score = 0
+def _score(p: Product, q_lower: str, par: dict, vec_ids: List[int]) -> int:
+    s = 0
     title = (p.title or "").lower()
-    sku = (p.sku or "").lower()
-    desc = (p.description or "").lower()
-    search = (p.search_text or "").lower()
+    sku   = (p.sku or "").lower()
+    srch  = (p.search_text or "").lower()
+    desc  = (p.description or "").lower()
+    attrs = str(p.attributes or {}).lower()
+    alltext = f"{title} {sku} {srch} {desc} {attrs}"
 
-    q_sku = params.get("sku", "").lower()
+    # SKU
+    q_sku = par.get("sku","").lower()
+    if q_sku:
+        if sku == q_sku:                s += 200
+        elif sku.startswith(q_sku):     s += 150
+        elif q_sku in sku:              s += 120
+        elif q_sku in srch:             s += 90
 
-    # Exact SKU match — highest priority
-    if q_sku and sku == q_sku:
-        score += 100
-    elif q_sku and q_sku in sku:
-        score += 80
-    elif q_sku and q_sku in search:
-        score += 70
+    # Vector rank
+    if p.id in vec_ids:
+        s += max(80 - vec_ids.index(p.id)*2, 10)
 
-    # Vector similarity
-    if p.id in vector_ids:
-        idx = vector_ids.index(p.id)
-        score += max(60 - idx * 2, 20)  # closer to top = higher score
+    # Technical params — DN = d_вн = inner diameter
+    dn = par.get("dn") or par.get("d_inner")
+    if dn:
+        # Check all representations
+        if (f"DN{dn}" in srch or f"DN {dn}" in srch or
+            f"{dn}мм" in srch or f"{dn}mm" in srch or
+            f"d_вн_мм" in attrs and dn in attrs):
+            s += 70
+    if par.get("bar"):
+        bar_int = str(int(float(par["bar"])))
+        if bar_int in attrs or bar_int + " bar" in srch: s += 55
+    if par.get("temp") and par["temp"] in alltext: s += 40
+    if par.get("d_outer") and par["d_outer"] in alltext: s += 30
 
-    # Title exact match
-    if q_lower in title:
-        score += 50
-    elif any(w in title for w in q_lower.split() if len(w) > 3):
-        score += 30
+    # Title words
+    words = [w for w in q_lower.split() if len(w)>=3]
+    matched = sum(1 for w in words if w in title)
+    s += matched * 25
+    if matched == len(words) and words: s += 30
 
-    # Technical params
-    attrs_str = str(p.attributes or {}).lower()
-    variants_str = str(p.variants or []).lower()
-    if params.get("dn") and params["dn"] in attrs_str + variants_str:
-        score += 25
-    if params.get("bar") and params["bar"] in attrs_str:
-        score += 20
-    if params.get("temp") and params["temp"] in attrs_str:
-        score += 15
+    # Full text
+    for w in words:
+        if w in alltext: s += 3
 
-    # Description
-    if q_lower in desc:
-        score += 15
-    elif any(w in desc for w in q_lower.split() if len(w) > 3):
-        score += 8
-
-    # search_text (contains variant SKUs)
-    if q_lower in search:
-        score += 10
-
-    return score
-
+    return s
 
 @router.get("/")
 async def search(
@@ -129,104 +160,130 @@ async def search(
     db: AsyncSession = Depends(get_db),
 ):
     q_clean = q.strip()
+    q_exp   = _expand(q_clean)
     q_lower = q_clean.lower()
-    params = _parse_params(q_clean.upper() + " " + q_clean)
+    par     = _params(q_clean + " " + q_clean.upper())
 
-    # 1. Vector search (async, returns IDs sorted by similarity)
-    vector_ids = await _vector_search(q_clean, limit=30)
+    # 1. Vector
+    vec_ids = await _vec(q_exp, 40)
 
-    # 2. Build SQL filter — broad net
-    terms = [w for w in re.split(r'\s+', q_lower) if len(w) >= 2]
-    filters = []
+    all_ids: dict = {}
+    all_prods: dict = {}
 
-    # Always include vector results
-    if vector_ids:
-        filters.append(Product.id.in_(vector_ids[:30]))
+    # helper
+    async def add(rows, bonus=0):
+        for p in rows:
+            if p.id not in all_ids: all_ids[p.id] = 0
+            all_ids[p.id] += bonus
+            all_prods[p.id] = p
 
-    # SKU search
-    if params.get("sku"):
-        sku_t = f"%{params['sku']}%"
-        filters.append(or_(
-            Product.sku.ilike(sku_t),
-            Product.search_text.ilike(sku_t)
-        ))
+    # 2. SKU
+    if par.get("sku"):
+        await add((await db.execute(select(Product).where(
+            or_(Product.sku.ilike(f"%{par['sku']}%"),
+                Product.search_text.ilike(f"%{par['sku']}%"))
+        ).limit(20))).scalars().all(), 1000)
 
-    # Technical params
-    if params.get("dn"):
-        filters.append(or_(
-            Product.attributes.cast(__import__('sqlalchemy').Text).ilike(f"%DN{params['dn']}%"),
-            Product.attributes.cast(__import__('sqlalchemy').Text).ilike(f"%{params['dn']}%"),
-            Product.variants.cast(__import__('sqlalchemy').Text).ilike(f"%{params['dn']}%"),
-        ))
+    # 3. Vector results
+    if vec_ids:
+        rows = (await db.execute(select(Product).where(Product.id.in_(vec_ids)))).scalars().all()
+        await add(rows, 0)
 
-    # Text search on multiple fields
-    for term in terms[:4]:
-        t = f"%{term}%"
-        filters.append(or_(
-            Product.title.ilike(t),
-            Product.sku.ilike(t),
-            Product.description.ilike(t),
-            Product.search_text.ilike(t),
-        ))
+    # 4. Technical params — DN/mm = inner diameter, bar, temp
+    tech_filters = []
+    dn = par.get("dn") or par.get("d_inner")
+    if dn:
+        # DN65 → matches "DN65", "DN 65", "65мм", "65mm", "d_вн_мм: 65"
+        tech_filters.append(Product.search_text.ilike(f"%DN{dn}%"))
+        tech_filters.append(Product.search_text.ilike(f"%DN {dn}%"))
+        tech_filters.append(Product.search_text.ilike(f"%{dn}мм%"))
+        tech_filters.append(Product.search_text.ilike(f"%{dn}mm%"))
+        tech_filters.append(Product.search_text.ilike(f"%d_вн_мм%{dn}%"))
 
-    if not filters:
-        return {"query": q_clean, "total": 0, "items": [], "params": params}
+    if par.get("bar"):
+        bar_int = str(int(float(par["bar"])))
+        tech_filters.append(Product.search_text.ilike(f"%{bar_int} bar%"))
+        tech_filters.append(Product.search_text.ilike(f"%{bar_int} бар%"))
+        tech_filters.append(Product.search_text.ilike(f"%Тиск_бар%{bar_int}%"))
 
-    from sqlalchemy import or_ as sql_or
-    base_q = select(Product).where(sql_or(*filters))
-    if section_id:
-        base_q = base_q.where(Product.section_id == section_id)
-    if category_id:
-        base_q = base_q.where(Product.category_id == category_id)
+    if par.get("temp"):
+        tech_filters.append(Product.search_text.ilike(f"%{par['temp']}°%"))
+        tech_filters.append(Product.search_text.ilike(f"%Темп%{par['temp']}%"))
 
-    rows = (await db.execute(base_q.limit(200))).scalars().all()
+    if tech_filters:
+        rows = (await db.execute(select(Product).where(or_(*tech_filters)).limit(60))).scalars().all()
+        await add(rows, 80)
 
-    # Score and sort
-    scored = [(p, _score_product(p, q_lower, params, vector_ids)) for p in rows]
-    scored.sort(key=lambda x: -x[1])
+    # 5. AND keyword
+    words = [w for w in re.split(r'\s+', q_exp.lower())
+             if len(w)>=3 and w not in ('для','або','при','від','the','and','for','with')][:5]
+    if words:
+        conds = [or_(Product.title.ilike(f"%{w}%"), Product.search_text.ilike(f"%{w}%"),
+                     Product.description.ilike(f"%{w}%")) for w in words]
+        rows = (await db.execute(select(Product).where(and_(*conds)).limit(100))).scalars().all()
+        await add(rows, 50)
 
-    # Remove duplicates
+    # 6. OR fallback
+    if len(all_ids) < 5 and words:
+        conds = [Product.title.ilike(f"%{w}%") for w in words[:3]]
+        rows = (await db.execute(select(Product).where(or_(*conds)).limit(50))).scalars().all()
+        await add(rows, 10)
+
+    # 7. Load missing vector prods
+    miss = [i for i in vec_ids if i not in all_prods]
+    if miss:
+        for p in (await db.execute(select(Product).where(Product.id.in_(miss)))).scalars().all():
+            all_prods[p.id] = p
+
+    # Filter by section/category
+    if section_id or category_id:
+        all_prods = {i:p for i,p in all_prods.items()
+                     if (not section_id or p.section_id==section_id)
+                     and (not category_id or p.category_id==category_id)}
+        all_ids = {i:s for i,s in all_ids.items() if i in all_prods}
+
+    # Score & sort
+    scored = sorted(
+        [(all_prods[i], _score(all_prods[i], q_lower, par, vec_ids) + all_ids.get(i,0))
+         for i in all_prods],
+        key=lambda x: -x[1]
+    )
     seen, unique = set(), []
-    for p, score in scored:
-        if p.id not in seen:
-            seen.add(p.id)
-            unique.append((p, score))
+    for p, sc in scored:
+        if p.id not in seen: seen.add(p.id); unique.append((p, sc))
 
-    # Paginate
     total = len(unique)
     page_items = unique[(page-1)*page_size: page*page_size]
 
     results = []
-    for p, score in page_items:
-        doc = await db.get(Document, p.document_id)
-        d = {
-            "id": p.id, "title": p.title, "subtitle": p.subtitle or "",
-            "sku": p.sku or "", "description": (p.description or "")[:300],
-            "attributes": p.attributes or {}, "variants": p.variants or [],
-            "image_url": f"/api/products/{p.id}/image" if p.image_bbox else "",
-            "page_number": p.page_number, "document_id": p.document_id,
-            "section_id": p.section_id, "category_id": p.category_id,
-            "document_url": doc.file_url if doc else "",
-            "_score": score,
-            "_match": "sku" if params.get("sku") else ("vector" if p.id in vector_ids else "text"),
-        }
-        results.append(d)
+    for p, sc in page_items:
+        doc_obj = await db.get(Document, p.document_id)
+        match = ("sku" if par.get("sku") and par["sku"].lower() in (p.sku or "").lower()
+                 else "vector" if p.id in vec_ids else "text")
+        results.append({
+            "id":p.id, "title":p.title, "subtitle":p.subtitle or "",
+            "sku":p.sku or "", "description":(p.description or "")[:300],
+            "attributes":p.attributes or {}, "variants":p.variants or [],
+            "image_url":f"/api/products/{p.id}/image" if p.image_bbox else "",
+            "page_number":p.page_number,
+            "document_id":p.document_id, "section_id":p.section_id, "category_id":p.category_id,
+            "document_url":doc_obj.file_url if doc_obj else "",
+            "_score":sc, "_match":match,
+        })
 
     return {
-        "query": q_clean, "total": total, "page": page,
-        "page_size": page_size, "items": results,
-        "params_detected": params,
-        "vector_used": len(vector_ids) > 0,
+        "query":q_clean, "total":total, "page":page, "page_size":page_size,
+        "items":results, "params_detected":par,
+        "vector_used":bool(vec_ids),
+        "query_expanded": q_exp if q_exp != q_clean else None,
     }
-
 
 @router.get("/suggest")
 async def suggest(q: str = Query(..., min_length=2), db: AsyncSession = Depends(get_db)):
     t = f"%{q}%"
     rows = (await db.execute(
         select(Product.id, Product.title, Product.sku).where(
-            or_(Product.title.ilike(t), Product.sku.ilike(t),
-                Product.search_text.ilike(t))
+            or_(Product.title.ilike(t), Product.sku.ilike(t), Product.search_text.ilike(t))
         ).limit(8)
     )).all()
-    return {"suggestions": [{"id": r[0], "title": r[1], "sku": r[2]} for r in rows]}
+    return {"suggestions":[{"id":r[0],"title":r[1],"sku":r[2]} for r in rows]}
