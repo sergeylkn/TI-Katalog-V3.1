@@ -75,8 +75,12 @@ def _expand_q(q: str) -> str:
 def _extract_params(q: str) -> dict:
     q2 = _normalize_q(q)
     p = {}
-    if m := re.search(r'\b([A-Z]{2,8}[-][A-Z0-9][-A-Z0-9/\.]{2,30})\b', q2.upper()):
+    # Try SKU match on uppercase version (handles "ti-a101-08-08" → "TI-A101-08-08")
+    if m := re.search(r'\b([A-Z0-9]{2,8}[-_/][A-Z0-9][-A-Z0-9/_\.]{2,30})\b', q2.upper()):
         p['sku'] = m.group(1)
+    # Also check if entire query looks like a SKU (no spaces, has dashes)
+    elif re.match(r'^[a-zA-Z0-9]{2,}[-_/][a-zA-Z0-9][-a-zA-Z0-9/_\.]{2,}$', q2.strip()):
+        p['sku'] = q2.strip().upper()
     if m := re.search(r'(\d+[\.,]?\d*)\s*(?:bar|бар)\b', q2, re.I):
         p['bar'] = m.group(1).replace(',', '.')
     if m := re.search(r'([+-]?\d+)\s*°?\s*[Cc]\b', q2):
@@ -115,8 +119,7 @@ async def _vec(q: str, n: int = 40) -> List[int]:
         from core.database import engine
         async with engine.connect() as conn:
             res = await conn.execute(
-                text('SELECT id FROM products WHERE embedding IS NOT NULL ORDER BY embedding <=> CAST($1 AS vector) LIMIT $2'),
-                [str(emb), n])
+                text(f'SELECT id FROM products WHERE embedding IS NOT NULL ORDER BY embedding <=> \'{str(emb)}\'::vector LIMIT {n}'))
             return [row[0] for row in res.fetchall()]
     except Exception as e:
         logger.debug(f'vec: {e}'); return []
@@ -214,27 +217,47 @@ async def search(
             all_ids[p.id] = all_ids.get(p.id, 0) + bonus
             all_prods[p.id] = p
 
-    # 2a. ProductIndex lookup — instant by any variant SKU
-    q_up = _normalize_q(q_clean).upper()
+    # 2. SKU / Index search — multiple strategies
+    q_up = _normalize_q(q_clean).upper().strip()
+    q_up_nodash = re.sub(r'[-_/]', '', q_up)  # "TIA10108-08" for fuzzy match
+
+    # 2a. ProductIndex table (fast, catches all variant SKUs)
+    idx_filters = [
+        ProductIndex.index_value == q_up,
+        ProductIndex.index_value.ilike(f"{q_up}%"),
+    ]
+    # Also try without dashes
+    if q_up_nodash != q_up and len(q_up_nodash) >= 4:
+        idx_filters.append(ProductIndex.index_value.ilike(f"{q_up_nodash}%"))
+    
     idx_rows = (await db.execute(
-        select(ProductIndex).where(
-            or_(
-                ProductIndex.index_value == q_up,
-                ProductIndex.index_value.ilike(f"{q_up}%"),
-            )
-        ).limit(10)
+        select(ProductIndex).where(or_(*idx_filters)).limit(20)
     )).scalars().all()
     if idx_rows:
-        pids = [r.product_id for r in idx_rows]
+        pids = list({r.product_id for r in idx_rows})
         idx_prods = (await db.execute(select(Product).where(Product.id.in_(pids)))).scalars().all()
-        await add(idx_prods, 2000)  # highest priority
+        await add(idx_prods, 2000)
 
-    # 2b. SKU partial match in own SKU field
-    if par.get('sku'):
-        await add((await db.execute(select(Product).where(
-            or_(Product.sku.ilike(f"%{par['sku']}%"),
-                Product.search_text.ilike(f"%{par['sku']}%"))
-        ).limit(20))).scalars().all(), 1000)
+    # 2b. Direct SKU field match (own SKU, not variants)
+    sku_q = par.get('sku') or q_up
+    if sku_q and len(sku_q) >= 4:
+        rows = (await db.execute(select(Product).where(
+            or_(
+                Product.sku.ilike(f"{sku_q}%"),      # starts with
+                Product.sku.ilike(f"%{sku_q}%"),      # contains
+            )
+        ).limit(20))).scalars().all()
+        await add(rows, 1500)
+
+    # 2c. search_text contains the index (catches variant SKUs even without ProductIndex)
+    if sku_q and len(sku_q) >= 4:
+        rows = (await db.execute(select(Product).where(
+            or_(
+                Product.search_text.ilike(f"%{sku_q}%"),
+                Product.search_text.ilike(f"%{q_up_nodash}%") if q_up_nodash != q_up else Product.search_text.ilike(f"%{sku_q}%"),
+            )
+        ).limit(30))).scalars().all()
+        await add(rows, 1000)
 
     # 3. Vector results
     if vec_ids:
@@ -450,11 +473,35 @@ async def suggest(q: str = Query(..., min_length=2), db: AsyncSession = Depends(
                     "match_type": ir.index_type,   # "sku" | "variant"
                 })
 
-    # 2. Title search for remaining slots
+    # 2. Direct SKU field search
+    if len(results) < 8:
+        sku_rows = (await db.execute(
+            select(Product.id, Product.title, Product.sku).where(
+                Product.sku.ilike(f"{q_up}%")
+            ).limit(6)
+        )).all()
+        for pid, title, sku in sku_rows:
+            if pid not in seen_ids and len(results) < 8:
+                seen_ids.add(pid)
+                results.append({"id": pid, "title": title, "sku": sku or "", "match_type": "sku"})
+
+    # 3. search_text contains (catches variant SKUs)
+    if len(results) < 8:
+        srch_rows = (await db.execute(
+            select(Product.id, Product.title, Product.sku).where(
+                Product.search_text.ilike(f"%{q_up}%")
+            ).limit(8)
+        )).all()
+        for pid, title, sku in srch_rows:
+            if pid not in seen_ids and len(results) < 8:
+                seen_ids.add(pid)
+                results.append({"id": pid, "title": title, "sku": q_up, "match_type": "index"})
+
+    # 4. Title search
     if len(results) < 8:
         title_rows = (await db.execute(
             select(Product.id, Product.title, Product.sku).where(
-                Product.title.ilike(t)
+                Product.title.ilike(f"%{q}%")
             ).limit(8)
         )).all()
         for pid, title, sku in title_rows:

@@ -2,458 +2,434 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 
 const API = process.env.NEXT_PUBLIC_API_URL || ''
+const req = (url: string, opts?: RequestInit) => fetch(`${API}${url}`, opts).then(r => r.json())
 
-const f = (url: string, opts?: RequestInit) => fetch(`${API}${url}`, opts).then(r => r.json())
+// ── Types ─────────────────────────────────────────────────────────────────────
+interface LogEntry { ts: string; level: string; msg: string; doc?: string; products?: number; pages?: number }
+interface ProgressEvent { done: number; total: number; pct: number; current: string; products: number }
+interface StatusData { total: number; done: number; error: number; parsing: number; products: number; running: boolean }
 
-// ── Status badge ──────────────────────────────────────────────────────────────
-function Badge({ status }: { status: string }) {
-  const map: Record<string, { bg: string; color: string; label: string }> = {
-    done:    { bg: '#EAF3DE', color: '#3B6D11', label: '✓ done' },
-    error:   { bg: '#FCEBEB', color: '#A32D2D', label: '✕ error' },
-    parsing: { bg: '#FEF3CD', color: '#854F0B', label: '⚙ parsing' },
-    pending: { bg: '#F0F0F0', color: '#555',    label: '· pending' },
-    warn:    { bg: '#FEF3CD', color: '#854F0B', label: '⚠ warn' },
-    info:    { bg: '#E6F1FB', color: '#185FA5', label: 'ℹ info' },
-    started: { bg: '#E6F1FB', color: '#185FA5', label: '▶ started' },
-  }
-  const s = map[status?.toLowerCase()] || { bg: '#F0F0F0', color: '#555', label: status || '?' }
+// ── Status card ───────────────────────────────────────────────────────────────
+function Stat({ label, value, color }: { label: string; value: number; color?: string }) {
   return (
-    <span style={{
-      fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 10,
-      background: s.bg, color: s.color, flexShrink: 0, whiteSpace: 'nowrap',
-    }}>{s.label}</span>
-  )
-}
-
-// ── Log row ───────────────────────────────────────────────────────────────────
-function LogRow({ log, type }: { log: any; type: 'import' | 'parse' }) {
-  const isErr = log.status === 'error' || log.level === 'error'
-  const isOk  = log.status === 'done'
-  const time  = log.at ? new Date(log.at).toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : ''
-  const doc   = log.doc || (log.doc_id ? `doc#${log.doc_id}` : '')
-  const msg   = log.msg || log.message || ''
-  const status = log.status || log.level || 'info'
-
-  return (
-    <div style={{
-      display: 'grid',
-      gridTemplateColumns: '52px 80px 1fr auto',
-      gap: 8, alignItems: 'center',
-      padding: '5px 10px',
-      borderRadius: 5,
-      background: isErr ? 'rgba(163,45,45,.07)' : isOk ? 'rgba(59,109,17,.04)' : 'transparent',
-      borderLeft: `3px solid ${isErr ? '#A32D2D' : isOk ? '#3B6D11' : 'transparent'}`,
-      fontSize: 12,
-    }}>
-      <span style={{ color: 'var(--text3)', fontFamily: 'var(--font-mono)', fontSize: 10 }}>{time}</span>
-      <Badge status={status} />
-      <div style={{ minWidth: 0 }}>
-        {doc && <span style={{ color: 'var(--text3)', fontFamily: 'var(--font-mono)', fontSize: 10, marginRight: 6 }}>{doc.slice(0, 30)}</span>}
-        <span style={{ color: isErr ? '#A32D2D' : 'var(--text)', wordBreak: 'break-word' }}>{msg}</span>
+    <div style={{ textAlign: 'center', padding: '10px 0' }}>
+      <div style={{ fontSize: 28, fontWeight: 800, fontFamily: 'monospace', color: color || '#1a1a1a', lineHeight: 1 }}>
+        {value ?? 0}
       </div>
-      <span style={{ fontSize: 10, color: 'var(--text3)' }} />
+      <div style={{ fontSize: 11, color: '#888', marginTop: 4 }}>{label}</div>
     </div>
   )
 }
 
-// ── ENV Key card ──────────────────────────────────────────────────────────────
-function EnvCard({ name, val }: { name: string; val: any }) {
-  const icons: Record<string, string> = {
-    ANTHROPIC_API_KEY: '🤖', OPENAI_API_KEY: '🔮',
-    DATABASE_URL: '🗄️', PORT: '🔌',
+// ── Log line ──────────────────────────────────────────────────────────────────
+function LogLine({ entry, idx }: { entry: LogEntry; idx: number }) {
+  const colors: Record<string, string> = {
+    done: '#22c55e', error: '#ef4444', info: '#60a5fa',
+    warn: '#f59e0b', progress: '#a78bfa',
   }
-  const descs: Record<string, string> = {
-    ANTHROPIC_API_KEY: 'AI чат та підбір',
-    OPENAI_API_KEY: 'Векторний пошук',
-    DATABASE_URL: 'PostgreSQL',
-    PORT: 'Порт сервера',
-  }
+  const color = colors[entry.level] || '#94a3b8'
+
   return (
     <div style={{
-      display: 'flex', alignItems: 'center', gap: 10,
-      padding: '10px 14px', borderRadius: 8,
-      border: `1px solid ${val?.active ? 'rgba(59,109,17,.3)' : 'rgba(163,45,45,.3)'}`,
-      background: val?.active ? 'rgba(59,109,17,.04)' : 'rgba(163,45,45,.04)',
+      display: 'grid', gridTemplateColumns: '52px 12px 1fr',
+      gap: 8, padding: '2px 0',
+      opacity: Math.max(0.4, 1 - idx * 0.02),
     }}>
-      <span style={{ fontSize: 22 }}>{icons[name] || '⚙️'}</span>
-      <div style={{ flex: 1 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <code style={{ fontSize: 11, fontWeight: 700 }}>{name}</code>
-          <Badge status={val?.active ? 'done' : 'error'} />
-        </div>
-        <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 2 }}>
-          {descs[name]}
-          {val?.active && val?.preview && (
-            <code style={{ marginLeft: 8, color: 'var(--text2)' }}>{val.preview}</code>
-          )}
-        </div>
-      </div>
+      <span style={{ fontSize: 10, color: '#475569', fontFamily: 'monospace' }}>{entry.ts}</span>
+      <span style={{ color, fontSize: 14, lineHeight: 1.4 }}>●</span>
+      <span style={{ fontSize: 12, color: '#e2e8f0', lineHeight: 1.5, wordBreak: 'break-all' }}>
+        {entry.doc && <span style={{ color: '#94a3b8', marginRight: 6 }}>[{entry.doc.slice(0, 35)}]</span>}
+        {entry.msg}
+        {entry.products !== undefined && (
+          <span style={{ marginLeft: 8, color: '#22c55e', fontSize: 11 }}>+{entry.products} товарів</span>
+        )}
+      </span>
     </div>
   )
 }
 
-// ── Main page ─────────────────────────────────────────────────────────────────
+// ── Main ──────────────────────────────────────────────────────────────────────
 export default function AdminPage() {
-  const [status, setStatus]       = useState<any>(null)
+  const [status, setStatus] = useState<StatusData | null>(null)
   const [envStatus, setEnvStatus] = useState<any>(null)
-  const [importLogs, setImportLogs] = useState<any[]>([])
-  const [parseLogs, setParseLogs]   = useState<any[]>([])
   const [indexStats, setIndexStats] = useState<any>(null)
-  const [toast, setToast]         = useState<{ msg: string; ok: boolean } | null>(null)
-  const [autoRefresh, setAutoRefresh] = useState(true)
-  const [logFilter, setLogFilter] = useState<'all'|'error'|'done'>('all')
-  const timerRef = useRef<any>(null)
+  const [liveLog, setLiveLog] = useState<LogEntry[]>([])
+  const [progress, setProgress] = useState<ProgressEvent | null>(null)
+  const [connected, setConnected] = useState(false)
+  const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null)
+  const [tab, setTab] = useState<'live' | 'history'>('live')
+  const [historyLogs, setHistoryLogs] = useState<any[]>([])
+  const [parseLogs, setParseLogs] = useState<any[]>([])
+
+  const logEndRef = useRef<HTMLDivElement>(null)
+  const sseRef = useRef<EventSource | null>(null)
+  const statusTimer = useRef<any>(null)
 
   const notify = (msg: string, ok = true) => {
     setToast({ msg, ok })
-    setTimeout(() => setToast(null), 4000)
+    setTimeout(() => setToast(null), 5000)
   }
 
-  const refresh = useCallback(async () => {
-    try {
-      const [s, env, il, pl, idx] = await Promise.all([
-        f('/api/admin/import-status'),
-        f('/api/admin/env-status').catch(() => null),
-        f('/api/admin/import-logs?limit=100'),
-        f('/api/admin/parse-logs?limit=100'),
-        f('/api/admin/index-stats').catch(() => null),
-      ])
-      setStatus(s)
-      setEnvStatus(env)
-      setImportLogs(il?.logs || [])
-      setParseLogs(pl?.logs || [])
-      setIndexStats(idx)
-    } catch (e) {
-      console.error(e)
+  // SSE connection
+  useEffect(() => {
+    const connect = () => {
+      if (sseRef.current) sseRef.current.close()
+      const es = new EventSource(`${API}/api/admin/live-log`)
+      sseRef.current = es
+
+      es.onopen = () => setConnected(true)
+      es.onerror = () => {
+        setConnected(false)
+        setTimeout(connect, 3000) // reconnect
+      }
+      es.onmessage = (e) => {
+        try {
+          const data = JSON.parse(e.data)
+          if (data.type === 'ping') return
+          if (data.type === 'connected') { setConnected(true); return }
+
+          if (data.type === 'progress') {
+            setProgress(data as ProgressEvent)
+            refreshStatus()
+          } else if (data.type === 'log') {
+            const entry: LogEntry = {
+              ts: data.ts || new Date().toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+              level: data.level || 'info',
+              msg: data.msg || '',
+              doc: data.doc,
+              products: data.products,
+              pages: data.pages,
+            }
+            setLiveLog(prev => [entry, ...prev].slice(0, 300))
+            if (data.level === 'done' || data.level === 'error') {
+              refreshStatus()
+            }
+          }
+        } catch {}
+      }
     }
+    connect()
+    return () => { sseRef.current?.close(); clearInterval(statusTimer.current) }
+  }, [])
+
+  // Auto-scroll live log
+  useEffect(() => {
+    if (tab === 'live') logEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [liveLog, tab])
+
+  const refreshStatus = useCallback(async () => {
+    try {
+      const [s, env, idx] = await Promise.all([
+        req('/api/admin/import-status'),
+        req('/api/admin/env-status').catch(() => null),
+        req('/api/admin/index-stats').catch(() => null),
+      ])
+      setStatus(s); setEnvStatus(env); setIndexStats(idx)
+    } catch {}
+  }, [])
+
+  const loadHistory = useCallback(async () => {
+    try {
+      const [il, pl] = await Promise.all([
+        req('/api/admin/import-logs?limit=150'),
+        req('/api/admin/parse-logs?limit=150'),
+      ])
+      setHistoryLogs(il?.logs || [])
+      setParseLogs(pl?.logs || [])
+    } catch {}
   }, [])
 
   useEffect(() => {
-    refresh()
-  }, [refresh])
+    refreshStatus()
+    statusTimer.current = setInterval(refreshStatus, 5000)
+    return () => clearInterval(statusTimer.current)
+  }, [refreshStatus])
 
   useEffect(() => {
-    if (autoRefresh) {
-      timerRef.current = setInterval(refresh, 4000)
-    } else {
-      clearInterval(timerRef.current)
-    }
-    return () => clearInterval(timerRef.current)
-  }, [autoRefresh, refresh])
+    if (tab === 'history') loadHistory()
+  }, [tab, loadHistory])
 
   const doImport = async () => {
-    try { await f('/api/admin/import-all-pdfs', { method: 'POST' }); notify('▶ Імпорт запущено'); refresh() }
-    catch { notify('❌ Помилка запуску', false) }
+    try {
+      await req('/api/admin/import-all-pdfs', { method: 'POST' })
+      notify('▶ Імпорт запущено — дивіться консоль нижче')
+      setTab('live')
+      setLiveLog([])
+      setProgress(null)
+    } catch { notify('❌ Помилка запуску', false) }
   }
 
   const doClear = async () => {
-    if (!confirm('Очистити ВСІ дані? Це незворотньо.')) return
-    try { await f('/api/admin/clear-database', { method: 'POST' }); notify('✓ База очищена'); refresh() }
+    if (!confirm('Очистити ВСІ дані? Незворотньо.')) return
+    try { await req('/api/admin/clear-database', { method: 'POST' }); notify('✓ База очищена'); refreshStatus() }
     catch { notify('❌ Помилка', false) }
   }
 
-  const doRebuildIdx = async () => {
+  const doAction = async (url: string, msg: string) => {
     try {
-      await f('/api/admin/rebuild-indexes', { method: 'POST' })
-      notify('▶ Перебудова індексів запущена (~2 хв)')
-      setTimeout(refresh, 5000)
+      await req(url, { method: 'POST' })
+      notify(msg); setTab('live')
+      setTimeout(refreshStatus, 3000)
     } catch { notify('❌ Помилка', false) }
   }
 
-  const progress = status?.total > 0 ? Math.round((status.done / status.total) * 100) : 0
-  const isRunning = (status?.running || status?.parsing > 0)
-
-  // Filter logs
-  const filteredImport = importLogs.filter(l =>
-    logFilter === 'all' ? true : logFilter === 'error' ? l.status === 'error' : l.status === 'done'
-  )
-  const filteredParse = parseLogs.filter(l =>
-    logFilter === 'all' ? true : logFilter === 'error' ? l.level === 'error' : l.level === 'info'
-  )
+  const progress_pct = progress?.pct ?? (status?.total ? Math.round(status.done / status.total * 100) : 0)
+  const is_running = status?.running || (status?.parsing ?? 0) > 0 || (progress && progress.done < progress.total)
 
   return (
-    <div style={{ fontFamily: 'var(--font-sans, system-ui)', minHeight: '100vh', background: 'var(--bg, #F5F4F0)', color: 'var(--text, #1a1a1a)' }}>
+    <div style={{
+      minHeight: '100vh', background: '#0f172a', color: '#e2e8f0',
+      fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    }}>
+
       {/* ── Header ── */}
-      <div style={{ background: '#0E0E0E', padding: '14px 32px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+      <div style={{ background: '#1e293b', borderBottom: '1px solid #334155', padding: '12px 28px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-          <a href="/" style={{ color: 'white', textDecoration: 'none', fontSize: 18, fontWeight: 700 }}>TI·Каталог</a>
-          <span style={{ color: '#555' }}>›</span>
-          <span style={{ color: '#aaa', fontSize: 14 }}>Адмін</span>
+          <a href="/" style={{ color: '#f1f5f9', textDecoration: 'none', fontWeight: 700, fontSize: 18 }}>TI·Каталог</a>
+          <span style={{ color: '#475569' }}>›</span>
+          <span style={{ color: '#94a3b8', fontSize: 14 }}>Адміністрування</span>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', color: '#aaa', fontSize: 12 }}>
-            <input type="checkbox" checked={autoRefresh} onChange={e => setAutoRefresh(e.target.checked)} />
-            Авто-оновлення (4с)
-          </label>
-          <button onClick={refresh} style={{
-            background: '#222', border: '1px solid #333', color: '#aaa',
-            borderRadius: 6, padding: '5px 12px', cursor: 'pointer', fontSize: 12,
-          }}>↻ Оновити</button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+            <span style={{ width: 8, height: 8, borderRadius: '50%', background: connected ? '#22c55e' : '#ef4444', display: 'inline-block', animation: connected && is_running ? 'pulse 1s infinite' : 'none' }} />
+            <span style={{ color: '#94a3b8' }}>{connected ? (is_running ? 'Виконується...' : 'Підключено') : 'Відключено'}</span>
+          </div>
+          <button onClick={refreshStatus} style={{ background: '#334155', border: 'none', color: '#94a3b8', borderRadius: 6, padding: '5px 12px', cursor: 'pointer', fontSize: 12 }}>↻</button>
         </div>
       </div>
 
       {/* ── Toast ── */}
       {toast && (
-        <div style={{
-          position: 'fixed', top: 16, right: 16, zIndex: 999,
-          padding: '10px 18px', borderRadius: 8,
-          background: toast.ok ? '#EAF3DE' : '#FCEBEB',
-          color: toast.ok ? '#3B6D11' : '#A32D2D',
-          border: `1px solid ${toast.ok ? '#C0DD97' : '#F7C1C1'}`,
-          fontSize: 13, fontWeight: 500, boxShadow: '0 4px 16px rgba(0,0,0,.1)',
-        }}>{toast.msg}</div>
+        <div style={{ position: 'fixed', top: 16, right: 16, zIndex: 999, padding: '10px 18px', borderRadius: 8, background: toast.ok ? '#166534' : '#7f1d1d', color: 'white', fontSize: 13, fontWeight: 500, boxShadow: '0 4px 20px rgba(0,0,0,.4)' }}>
+          {toast.msg}
+        </div>
       )}
 
-      <div style={{ maxWidth: 1200, margin: '0 auto', padding: '24px 24px 60px' }}>
+      <div style={{ maxWidth: 1300, margin: '0 auto', padding: '20px 20px 60px', display: 'flex', gap: 16 }}>
 
-        {/* ── ENV STATUS ── */}
-        <section style={{ marginBottom: 20 }}>
-          <h2 style={{ fontSize: 16, fontWeight: 700, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
-            🔑 Змінні середовища
-            {envStatus && (
-              <Badge status={Object.values(envStatus).every((v: any) => v?.active) ? 'done' : 'error'} />
-            )}
-          </h2>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-            {envStatus ? Object.entries(envStatus).map(([k, v]) => (
-              <EnvCard key={k} name={k} val={v} />
-            )) : (
-              <div style={{ color: 'var(--text3)', fontSize: 13 }}>Завантаження...</div>
-            )}
-          </div>
-          <div style={{
-            marginTop: 10, padding: '8px 12px', background: 'rgba(196,30,30,.06)',
-            borderRadius: 6, fontSize: 12, color: 'var(--text2)',
-            borderLeft: '3px solid var(--accent, #C41E1E)',
-          }}>
-            💡 Ключі зберігаються в Railway → Variables і активні автоматично при кожному запуску.
-          </div>
-        </section>
+        {/* ── Left sidebar ── */}
+        <div style={{ width: 280, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
 
-        {/* ── IMPORT STATUS + ACTIONS ── */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 20 }}>
-
-          {/* Status */}
-          <section style={{ background: 'var(--card, white)', borderRadius: 12, padding: 20, border: '1px solid var(--border, #e8e5df)' }}>
-            <h2 style={{ fontSize: 16, fontWeight: 700, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
-              📊 Статус імпорту
-              {isRunning && <span style={{ fontSize: 11, animation: 'pulse 1s infinite', color: '#854F0B' }}>⚙ виконується</span>}
-            </h2>
-
-            {status ? (
-              <>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 16 }}>
-                  {[
-                    { label: 'Всього PDF', val: status.total, color: 'var(--text)' },
-                    { label: 'Товарів в БД', val: status.products, color: '#185FA5' },
-                    { label: '✓ Завершено', val: status.done, color: '#3B6D11' },
-                    { label: '✕ Помилок', val: status.error, color: '#A32D2D' },
-                    { label: '⚙ В обробці', val: status.parsing, color: '#854F0B' },
-                    { label: '· Очікують', val: Math.max(0, status.total - status.done - status.parsing - status.error), color: '#555' },
-                  ].map(({ label, val, color }) => (
-                    <div key={label} style={{
-                      padding: '10px 14px', borderRadius: 8,
-                      background: 'var(--bg2, #F5F4F0)',
-                      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                    }}>
-                      <span style={{ fontSize: 12, color: 'var(--text2)' }}>{label}</span>
-                      <strong style={{ fontSize: 20, fontFamily: 'var(--font-mono)', color }}>{val ?? 0}</strong>
-                    </div>
-                  ))}
+          {/* Status numbers */}
+          <div style={{ background: '#1e293b', borderRadius: 12, border: '1px solid #334155', padding: '16px 8px' }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: 1, padding: '0 12px', marginBottom: 12 }}>Статус імпорту</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1, background: '#334155' }}>
+              {[
+                { label: 'Всього PDF', value: status?.total ?? 0, color: '#e2e8f0' },
+                { label: 'Товарів в БД', value: status?.products ?? 0, color: '#60a5fa' },
+                { label: '✓ Готово', value: status?.done ?? 0, color: '#22c55e' },
+                { label: '✕ Помилки', value: status?.error ?? 0, color: '#ef4444' },
+                { label: '⚙ Парситься', value: status?.parsing ?? 0, color: '#f59e0b' },
+                { label: '· Очікує', value: Math.max(0, (status?.total ?? 0) - (status?.done ?? 0) - (status?.parsing ?? 0) - (status?.error ?? 0)), color: '#64748b' },
+              ].map(({ label, value, color }) => (
+                <div key={label} style={{ background: '#1e293b', padding: '10px 8px', textAlign: 'center' }}>
+                  <div style={{ fontSize: 24, fontWeight: 800, fontFamily: 'monospace', color, lineHeight: 1 }}>{value}</div>
+                  <div style={{ fontSize: 10, color: '#64748b', marginTop: 3 }}>{label}</div>
                 </div>
-
-                {status.total > 0 && (
-                  <>
-                    <div style={{ height: 10, background: 'var(--bg2)', borderRadius: 5, overflow: 'hidden', marginBottom: 6 }}>
-                      <div style={{
-                        height: '100%', borderRadius: 5,
-                        background: progress === 100 ? '#3B6D11' : '#C41E1E',
-                        width: `${progress}%`, transition: 'width .5s',
-                      }} />
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: 'var(--text3)' }}>
-                      <span>{progress}%</span>
-                      <span>{status.done} / {status.total} документів</span>
-                    </div>
-                  </>
-                )}
-
-                {/* Index stats */}
-                {indexStats && (
-                  <div style={{ marginTop: 12, padding: '8px 12px', background: 'var(--bg2)', borderRadius: 6, fontSize: 12 }}>
-                    🔍 Індекс артикулів: <strong>{indexStats.total_indexes?.toLocaleString() || 0}</strong> записів
-                    {indexStats.by_type && Object.entries(indexStats.by_type).map(([k, v]: any) => (
-                      <span key={k} style={{ marginLeft: 10, color: 'var(--text3)' }}>{k}: {v}</span>
-                    ))}
-                    {(!indexStats.total_indexes || indexStats.total_indexes === 0) && (
-                      <span style={{ color: '#A32D2D', marginLeft: 8 }}>⚠ порожній — натисніть "Перебудувати"</span>
-                    )}
-                  </div>
-                )}
-              </>
-            ) : (
-              <div style={{ textAlign: 'center', padding: 24, color: 'var(--text3)' }}>Завантаження...</div>
-            )}
-          </section>
-
-          {/* Actions */}
-          <section style={{ background: 'var(--card, white)', borderRadius: 12, padding: 20, border: '1px solid var(--border, #e8e5df)' }}>
-            <h2 style={{ fontSize: 16, fontWeight: 700, marginBottom: 16 }}>⚙️ Дії</h2>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              <button onClick={doImport} style={{
-                padding: '12px 16px', borderRadius: 8, border: 'none',
-                background: '#C41E1E', color: 'white', cursor: 'pointer',
-                fontSize: 14, fontWeight: 600, textAlign: 'left',
-              }}>
-                ▶ Імпортувати всі PDF
-                <div style={{ fontSize: 11, fontWeight: 400, opacity: .8, marginTop: 2 }}>
-                  189 PDF · ~15-20 хв · ~$0.02 embeddings
-                </div>
-              </button>
-
-              <button onClick={doRebuildIdx} style={{
-                padding: '12px 16px', borderRadius: 8,
-                border: '1px solid rgba(24,95,165,.4)',
-                background: 'rgba(24,95,165,.05)', color: '#185FA5',
-                cursor: 'pointer', fontSize: 13, fontWeight: 600, textAlign: 'left',
-              }}>
-                🔍 Перебудувати індекси артикулів
-                <div style={{ fontSize: 11, fontWeight: 400, opacity: .8, marginTop: 2 }}>
-                  ~1-2 хв · без реімпорту PDF · читає з БД
-                </div>
-              </button>
-
-              <button onClick={refresh} style={{
-                padding: '10px 16px', borderRadius: 8,
-                border: '1px solid var(--border, #e8e5df)',
-                background: 'transparent', color: 'var(--text)',
-                cursor: 'pointer', fontSize: 13,
-              }}>
-                ↻ Оновити статус
-              </button>
-
-              <button onClick={doClear} style={{
-                padding: '10px 16px', borderRadius: 8, marginTop: 8,
-                border: '1px solid rgba(163,45,45,.3)',
-                background: 'rgba(163,45,45,.04)', color: '#A32D2D',
-                cursor: 'pointer', fontSize: 13,
-              }}>
-                🗑 Очистити БД (незворотньо)
-              </button>
-            </div>
-          </section>
-        </div>
-
-        {/* ── LOGS ── */}
-        <section style={{ background: 'var(--card, white)', borderRadius: 12, border: '1px solid var(--border, #e8e5df)', overflow: 'hidden' }}>
-
-          {/* Log header + filter */}
-          <div style={{
-            padding: '14px 20px', borderBottom: '1px solid var(--border)',
-            display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8,
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <h2 style={{ fontSize: 16, fontWeight: 700 }}>📋 Логи</h2>
-              <span style={{ fontSize: 12, color: 'var(--text3)' }}>
-                Імпорт: {importLogs.length} · Парсинг: {parseLogs.length}
-              </span>
-              {isRunning && (
-                <span style={{ fontSize: 12, color: '#854F0B', background: '#FEF3CD', padding: '2px 8px', borderRadius: 4 }}>
-                  ⚙ Оновлюється автоматично
-                </span>
-              )}
-            </div>
-            <div style={{ display: 'flex', gap: 6 }}>
-              {(['all','error','done'] as const).map(f => (
-                <button key={f} onClick={() => setLogFilter(f)} style={{
-                  padding: '4px 12px', borderRadius: 20, fontSize: 12, cursor: 'pointer',
-                  border: logFilter === f ? '1px solid var(--accent)' : '1px solid var(--border)',
-                  background: logFilter === f ? 'var(--accent-bg, #fdf0f0)' : 'transparent',
-                  color: logFilter === f ? 'var(--accent)' : 'var(--text2)',
-                  fontWeight: logFilter === f ? 600 : 400,
-                }}>
-                  {f === 'all' ? 'Всі' : f === 'error' ? '✕ Помилки' : '✓ Успішні'}
-                </button>
               ))}
             </div>
+
+            {/* Progress bar */}
+            {(status?.total ?? 0) > 0 && (
+              <div style={{ padding: '12px 12px 4px' }}>
+                <div style={{ height: 6, background: '#0f172a', borderRadius: 3, overflow: 'hidden', marginBottom: 6 }}>
+                  <div style={{ height: '100%', background: progress_pct === 100 ? '#22c55e' : '#3b82f6', width: `${progress_pct}%`, transition: 'width .5s', borderRadius: 3 }} />
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#64748b' }}>
+                  <span>{progress_pct}%</span>
+                  <span>{status?.done}/{status?.total}</span>
+                </div>
+              </div>
+            )}
+
+            {/* Current doc */}
+            {progress?.current && (
+              <div style={{ margin: '8px 12px 4px', padding: '6px 10px', background: '#0f172a', borderRadius: 6, fontSize: 11, color: '#60a5fa', wordBreak: 'break-all' }}>
+                ⚙ {progress.current}
+              </div>
+            )}
           </div>
 
-          {/* Two columns */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', minHeight: 400 }}>
+          {/* ENV status */}
+          <div style={{ background: '#1e293b', borderRadius: 12, border: '1px solid #334155', padding: 14 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 10 }}>Ключі Railway</div>
+            {envStatus ? Object.entries(envStatus).map(([key, val]: any) => (
+              <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 0', borderBottom: '1px solid #1e293b' }}>
+                <span style={{ width: 8, height: 8, borderRadius: '50%', background: val?.active ? '#22c55e' : '#ef4444', flexShrink: 0 }} />
+                <span style={{ fontSize: 11, fontFamily: 'monospace', color: val?.active ? '#e2e8f0' : '#64748b', flex: 1 }}>{key}</span>
+                {val?.active && val?.preview && <span style={{ fontSize: 10, color: '#475569', fontFamily: 'monospace' }}>{val.preview}</span>}
+              </div>
+            )) : <div style={{ fontSize: 12, color: '#475569' }}>...</div>}
+          </div>
 
-            {/* Import logs */}
-            <div style={{ borderRight: '1px solid var(--border)' }}>
-              <div style={{
-                padding: '8px 14px', background: 'var(--bg2)',
-                borderBottom: '1px solid var(--border)',
-                fontSize: 12, fontWeight: 600, color: 'var(--text2)',
-                display: 'flex', justifyContent: 'space-between',
-              }}>
-                <span>Лог імпорту документів</span>
-                <span>{filteredImport.length} записів</span>
-              </div>
-              <div style={{ height: 500, overflowY: 'auto', padding: '4px 0' }}>
-                {filteredImport.length === 0 ? (
-                  <div style={{ padding: 24, textAlign: 'center', color: 'var(--text3)', fontSize: 13 }}>
-                    {logFilter === 'all' ? 'Логів немає. Запустіть імпорт.' : `Немає записів "${logFilter}"`}
-                  </div>
-                ) : filteredImport.map((l, i) => (
-                  <LogRow key={l.id || i} log={l} type="import" />
-                ))}
-              </div>
+          {/* Index stats */}
+          {indexStats && (
+            <div style={{ background: '#1e293b', borderRadius: 12, border: '1px solid #334155', padding: 14 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>Індекс артикулів</div>
+              <div style={{ fontSize: 22, fontWeight: 800, color: '#60a5fa', fontFamily: 'monospace' }}>{indexStats.total_indexes?.toLocaleString() || 0}</div>
+              <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>записів в індексі</div>
+              {(!indexStats.total_indexes || indexStats.total_indexes === 0) && (
+                <div style={{ fontSize: 11, color: '#f59e0b', marginTop: 6 }}>⚠ Запустіть "Виправити пошук"</div>
+              )}
             </div>
+          )}
 
-            {/* Parse logs */}
-            <div>
-              <div style={{
-                padding: '8px 14px', background: 'var(--bg2)',
-                borderBottom: '1px solid var(--border)',
-                fontSize: 12, fontWeight: 600, color: 'var(--text2)',
-                display: 'flex', justifyContent: 'space-between',
+          {/* Actions */}
+          <div style={{ background: '#1e293b', borderRadius: 12, border: '1px solid #334155', padding: 14, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>Дії</div>
+
+            <button onClick={doImport} style={{ padding: '10px 14px', borderRadius: 8, border: 'none', background: '#dc2626', color: 'white', cursor: 'pointer', fontSize: 13, fontWeight: 600, textAlign: 'left' }}>
+              ▶ Імпортувати всі PDF
+              <div style={{ fontSize: 10, fontWeight: 400, opacity: .75, marginTop: 2 }}>189 PDF · ~20 хв · ~$0.02</div>
+            </button>
+
+            <button onClick={() => doAction('/api/admin/rebuild-search-text', '▶ Виправлення пошуку запущено (~5 хв)')} style={{ padding: '10px 14px', borderRadius: 8, border: '1px solid #b45309', background: 'rgba(180,83,9,.1)', color: '#fbbf24', cursor: 'pointer', fontSize: 12, fontWeight: 600, textAlign: 'left' }}>
+              🛠 Виправити пошук по артикулах
+              <div style={{ fontSize: 10, fontWeight: 400, opacity: .75, marginTop: 2 }}>Без реімпорту · ~5 хв</div>
+            </button>
+
+            <button onClick={() => doAction('/api/admin/rebuild-indexes', '▶ Перебудова індексів запущена')} style={{ padding: '10px 14px', borderRadius: 8, border: '1px solid #1d4ed8', background: 'rgba(29,78,216,.1)', color: '#60a5fa', cursor: 'pointer', fontSize: 12, fontWeight: 600, textAlign: 'left' }}>
+              🔍 Перебудувати індекси артикулів
+              <div style={{ fontSize: 10, fontWeight: 400, opacity: .75, marginTop: 2 }}>Без реімпорту · ~2 хв</div>
+            </button>
+
+            <button onClick={() => refreshStatus()} style={{ padding: '8px 14px', borderRadius: 8, border: '1px solid #334155', background: 'transparent', color: '#94a3b8', cursor: 'pointer', fontSize: 12 }}>
+              ↻ Оновити статус
+            </button>
+
+            <button onClick={doClear} style={{ padding: '8px 14px', borderRadius: 8, border: '1px solid #7f1d1d', background: 'rgba(127,29,29,.1)', color: '#f87171', cursor: 'pointer', fontSize: 12, marginTop: 4 }}>
+              🗑 Очистити БД (незворотньо)
+            </button>
+          </div>
+        </div>
+
+        {/* ── Main console area ── */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 0 }}>
+
+          {/* Tabs */}
+          <div style={{ display: 'flex', gap: 0, borderBottom: '1px solid #334155' }}>
+            {(['live', 'history'] as const).map(t => (
+              <button key={t} onClick={() => setTab(t)} style={{
+                padding: '10px 20px', border: 'none', borderBottom: `2px solid ${tab === t ? '#3b82f6' : 'transparent'}`,
+                background: 'transparent', color: tab === t ? '#60a5fa' : '#64748b',
+                cursor: 'pointer', fontSize: 13, fontWeight: tab === t ? 600 : 400,
+                transition: 'color .15s',
               }}>
-                <span>Лог парсингу PDF</span>
-                <span>{filteredParse.length} записів</span>
+                {t === 'live' ? (
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    {connected && is_running && <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#22c55e', animation: 'pulse 1s infinite', display: 'inline-block' }} />}
+                    🖥 Живий лог
+                    {liveLog.length > 0 && <span style={{ fontSize: 11, background: '#1e3a5f', padding: '1px 6px', borderRadius: 10 }}>{liveLog.length}</span>}
+                  </span>
+                ) : '📋 Архів логів'}
+              </button>
+            ))}
+          </div>
+
+          {/* Live log console */}
+          {tab === 'live' && (
+            <div style={{
+              flex: 1, background: '#020617', borderRadius: '0 0 12px 12px',
+              border: '1px solid #1e293b', borderTop: 'none',
+              padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column',
+            }}>
+              {/* Console header */}
+              <div style={{ padding: '8px 16px', background: '#0f172a', borderBottom: '1px solid #1e293b', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#ef4444', display: 'inline-block' }} />
+                  <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#f59e0b', display: 'inline-block' }} />
+                  <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#22c55e', display: 'inline-block' }} />
+                  <span style={{ fontSize: 11, color: '#475569', marginLeft: 8, fontFamily: 'monospace' }}>
+                    ti-katalog — import console
+                  </span>
+                </div>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  {liveLog.length > 0 && (
+                    <button onClick={() => setLiveLog([])} style={{ background: 'none', border: 'none', color: '#475569', cursor: 'pointer', fontSize: 12 }}>
+                      clear
+                    </button>
+                  )}
+                  <span style={{ fontSize: 11, color: '#334155', fontFamily: 'monospace' }}>
+                    {connected ? '● connected' : '○ disconnected'}
+                  </span>
+                </div>
               </div>
-              <div style={{ height: 500, overflowY: 'auto', padding: '4px 0' }}>
-                {filteredParse.length === 0 ? (
-                  <div style={{ padding: 24, textAlign: 'center', color: 'var(--text3)', fontSize: 13 }}>
-                    {logFilter === 'all' ? 'Логів немає.' : `Немає записів "${logFilter}"`}
+
+              {/* Log output */}
+              <div style={{ flex: 1, overflowY: 'auto', padding: '12px 16px', minHeight: 500, maxHeight: 'calc(100vh - 260px)', display: 'flex', flexDirection: 'column-reverse' }}>
+                {liveLog.length === 0 ? (
+                  <div style={{ color: '#334155', fontSize: 13, fontFamily: 'monospace', padding: '20px 0' }}>
+                    <span style={{ color: '#22c55e' }}>$</span> Очікую на запуск імпорту...<br />
+                    <span style={{ color: '#475569' }}>Натисніть "▶ Імпортувати всі PDF" щоб розпочати</span>
                   </div>
-                ) : filteredParse.map((l, i) => (
-                  <LogRow key={l.id || i} log={l} type="parse" />
-                ))}
+                ) : (
+                  liveLog.map((entry, i) => (
+                    <LogLine key={i} entry={entry} idx={i} />
+                  ))
+                )}
+                <div ref={logEndRef} />
               </div>
+
+              {/* Progress bar at bottom */}
+              {progress && progress.total > 0 && (
+                <div style={{ padding: '8px 16px', background: '#0f172a', borderTop: '1px solid #1e293b' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#64748b', marginBottom: 4 }}>
+                    <span>{progress.current || 'Processing...'}</span>
+                    <span>{progress.done}/{progress.total} ({progress.pct}%)</span>
+                  </div>
+                  <div style={{ height: 4, background: '#1e293b', borderRadius: 2, overflow: 'hidden' }}>
+                    <div style={{ height: '100%', background: '#3b82f6', width: `${progress.pct}%`, transition: 'width .3s', borderRadius: 2 }} />
+                  </div>
+                </div>
+              )}
             </div>
-          </div>
+          )}
 
-          {/* Live indicator */}
-          <div style={{
-            padding: '8px 20px', borderTop: '1px solid var(--border)',
-            display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, color: 'var(--text3)',
-          }}>
-            <span style={{
-              width: 8, height: 8, borderRadius: '50%',
-              background: autoRefresh ? '#3B6D11' : '#aaa',
-              display: 'inline-block',
-              animation: autoRefresh && isRunning ? 'pulse 1s infinite' : 'none',
-            }} />
-            {autoRefresh ? (isRunning ? 'Живе оновлення — імпорт виконується' : 'Авто-оновлення активне') : 'Авто-оновлення вимкнено'}
-          </div>
-        </section>
-
+          {/* History logs */}
+          {tab === 'history' && (
+            <div style={{ background: '#1e293b', borderRadius: '0 0 12px 12px', border: '1px solid #334155', borderTop: 'none', display: 'grid', gridTemplateColumns: '1fr 1fr', minHeight: 500 }}>
+              {[
+                { title: 'Лог імпорту документів', logs: historyLogs, getLevel: (l: any) => l.status, getMsg: (l: any) => l.msg || l.message || '', getDoc: (l: any) => l.doc || '' },
+                { title: 'Лог парсингу PDF', logs: parseLogs, getLevel: (l: any) => l.level, getMsg: (l: any) => l.msg || l.message || '', getDoc: (l: any) => l.doc_id ? `doc#${l.doc_id}` : '' },
+              ].map(({ title, logs, getLevel, getMsg, getDoc }) => (
+                <div key={title} style={{ borderRight: '1px solid #334155' }}>
+                  <div style={{ padding: '10px 14px', borderBottom: '1px solid #334155', fontSize: 12, fontWeight: 600, color: '#94a3b8', display: 'flex', justifyContent: 'space-between' }}>
+                    <span>{title}</span>
+                    <span style={{ color: '#475569' }}>{logs.length}</span>
+                  </div>
+                  <div style={{ height: 540, overflowY: 'auto', padding: '4px 0' }}>
+                    {logs.length === 0 ? (
+                      <div style={{ padding: 24, textAlign: 'center', color: '#475569', fontSize: 12 }}>Порожньо</div>
+                    ) : logs.map((l: any, i: number) => {
+                      const colors: Record<string, string> = { done: '#22c55e', error: '#ef4444', info: '#60a5fa', queued: '#a78bfa', warn: '#f59e0b' }
+                      const lv = getLevel(l)
+                      const col = colors[lv] || '#64748b'
+                      const ts = l.at ? new Date(l.at).toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : ''
+                      return (
+                        <div key={i} style={{ display: 'grid', gridTemplateColumns: '50px 8px 1fr', gap: 8, padding: '4px 14px', borderLeft: `2px solid ${lv === 'error' ? '#ef4444' : 'transparent'}` }}>
+                          <span style={{ fontSize: 10, color: '#475569', fontFamily: 'monospace' }}>{ts}</span>
+                          <span style={{ color: col, fontSize: 12 }}>●</span>
+                          <div style={{ fontSize: 12, color: lv === 'error' ? '#fca5a5' : '#94a3b8', wordBreak: 'break-all' }}>
+                            {getDoc(l) && <span style={{ color: '#475569', marginRight: 6 }}>[{getDoc(l).slice(0,30)}]</span>}
+                            {getMsg(l).slice(0, 120)}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       <style>{`
-        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: system-ui, sans-serif; }
-        :root {
-          --bg: #F5F4F0; --bg2: #EEECE7; --card: #FFFFFF;
-          --text: #1a1a1a; --text2: #555; --text3: #888;
-          --border: #E2DED8; --accent: #C41E1E;
-          --font-mono: 'IBM Plex Mono', monospace;
-          --font-sans: 'IBM Plex Sans', system-ui, sans-serif;
-        }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #0f172a; }
+        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
       `}</style>
     </div>
   )

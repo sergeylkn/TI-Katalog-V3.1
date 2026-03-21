@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 from fastapi import APIRouter, Depends, BackgroundTasks
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from core.database import get_db
@@ -111,6 +112,22 @@ async def cache_stats():
     return {"cache": "disabled", "note": "lightweight mode"}
 
 
+
+
+@router.get("/live-log")
+async def live_log_stream():
+    """SSE stream of live import/parse events."""
+    from services.live_log import bus
+    return StreamingResponse(
+        bus.stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        }
+    )
+
 @router.get("/env-status")
 async def env_status():
     """Check status of all required environment variables."""
@@ -160,3 +177,81 @@ async def index_stats(db: AsyncSession = Depends(get_db)):
         "total_indexes": total,
         "by_type": {row[0]: row[1] for row in by_type},
     }
+
+
+@router.post("/rebuild-search-text")
+async def rebuild_search_text(bg: BackgroundTasks):
+    """
+    Rebuild search_text for all products from their variants JSON.
+    Fixes SKU search without full PDF reimport.
+    """
+    async def _do():
+        import logging, re
+        logger = logging.getLogger(__name__)
+        from core.database import AsyncSessionLocal
+        from models.models import Product, ProductIndex
+        from sqlalchemy import delete
+
+        SKU_KEYS = ["_sku","Індекс","Indeks","Index","index","SKU","Артикул","КОД","Part No"]
+
+        async with AsyncSessionLocal() as db:
+            offset = 0
+            updated = 0
+            errors = 0
+            while True:
+                rows = (await db.execute(
+                    select(Product).offset(offset).limit(200)
+                )).scalars().all()
+                if not rows:
+                    break
+
+                for p in rows:
+                    try:
+                        # Collect all variant SKUs
+                        sku_tokens = []
+                        for var in (p.variants or []):
+                            for sk in SKU_KEYS:
+                                if sk in var and var[sk]:
+                                    v = str(var[sk]).strip()
+                                    if len(v) >= 4:
+                                        sku_tokens.append(v)
+                                        sku_tokens.append(v.replace("-","").replace("_","").replace("/",""))
+
+                        if not sku_tokens:
+                            continue
+
+                        # Append SKU tokens to existing search_text
+                        existing = p.search_text or ""
+                        new_tokens = " ".join(sku_tokens)
+                        
+                        # Only update if tokens are missing
+                        missing = [t for t in sku_tokens[:5] if t not in existing]
+                        if missing:
+                            p.search_text = (existing + " " + new_tokens)[:10000]
+                            updated += 1
+
+                        # Also rebuild ProductIndex for this product
+                        await db.execute(
+                            delete(ProductIndex).where(ProductIndex.product_id == p.id)
+                        )
+                        for token in set(sku_tokens):
+                            if re.match(r'[A-Z0-9]{2,}[-_/]', token.upper()):
+                                db.add(ProductIndex(
+                                    product_id=p.id,
+                                    index_value=token.upper().strip(),
+                                    index_type="variant",
+                                    variant_row=None,
+                                ))
+
+                    except Exception as e:
+                        errors += 1
+                        logger.error(f"rebuild search_text product#{p.id}: {e}")
+
+                await db.commit()
+                offset += 200
+                logger.info(f"rebuild-search-text: {offset} processed, {updated} updated")
+
+            logger.info(f"Done: {updated} updated, {errors} errors")
+
+    bg.add_task(_do)
+    return {"status": "started", "message": "Rebuilding search_text + indexes in background..."}

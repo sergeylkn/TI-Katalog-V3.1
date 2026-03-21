@@ -18,6 +18,20 @@ from models.models import Document, Section, Category, ImportLog, ParseLog
 
 logger = logging.getLogger(__name__)
 
+def _live(msg, level="info", doc="", **kw):
+    try:
+        from services.live_log import log as live_log
+        live_log(msg, level=level, doc=doc, **kw)
+    except Exception:
+        pass
+
+def _live_progress(done, total, current="", products=0):
+    try:
+        from services.live_log import progress as live_progress
+        live_progress(done, total, current, products)
+    except Exception:
+        pass
+
 R2_BASE  = "https://pub-ada201ec5fb84401a3b36b7b21e6ed0f.r2.dev"
 MANIFEST = f"{R2_BASE}/manifest.txt"
 
@@ -322,6 +336,7 @@ async def run_import_all():
                 resp.raise_for_status()
             files = [l.strip() for l in resp.text.splitlines() if l.strip().lower().endswith(".pdf")]
             logger.info(f"Manifest: {len(files)} PDFs")
+            _live(f"📋 Manifest: {len(files)} PDF файлів знайдено", "info")
         except Exception as e:
             db.add(ImportLog(document_name="manifest.txt", status="error", message=str(e)[:400]))
             await db.commit()
@@ -352,13 +367,17 @@ async def run_import_all():
 
         await db.commit()
         logger.info(f"✅ Queued {len(new_ids)} documents")
+        _live(f"✅ Черга: {len(new_ids)} документів додано до обробки", "info")
 
-    for doc_id in new_ids:
+    total_docs = len(new_ids)
+    for idx, doc_id in enumerate(new_ids):
         try:
             await parse_one(doc_id)
         except Exception as e:
             logger.error(f"parse_one({doc_id}): {e}")
+        _live_progress(idx + 1, total_docs)
         await asyncio.sleep(0.3)
+    _live(f"🏁 Імпорт завершено: {total_docs} документів оброблено", "done")
 
 
 async def parse_one(doc_id: int):
@@ -377,6 +396,7 @@ async def parse_one(doc_id: int):
 
         try:
             await _log("info", f"📥 {doc.file_url}")
+            _live(f"⬇ Завантажую: {doc.name}", "info", doc=doc.name)
             async with httpx.AsyncClient(timeout=120, follow_redirects=True) as c:
                 resp = await c.get(doc.file_url)
                 resp.raise_for_status()
@@ -395,6 +415,7 @@ async def parse_one(doc_id: int):
 
             await _log("info", f"✅ {len(products)} товарів, {page_count} сторінок")
             logger.info(f"✅ doc#{doc_id} ({doc.name}): {len(products)} products")
+            _live(f"✅ {doc.name} — {len(products)} товарів, {page_count} стор.", "done", doc=doc.name)
 
         except Exception as e:
             logger.error(f"parse error doc#{doc_id}: {e}")
@@ -405,3 +426,4 @@ async def parse_one(doc_id: int):
                     doc2.error_msg = str(e)[:400]
                     await db2.commit()
             await _log("error", str(e)[:400])
+            _live(f"❌ {doc.name}: {str(e)[:120]}", "error", doc=doc.name)

@@ -154,7 +154,22 @@ def _build_search_text(title, subtitle, sku, attrs, variants, description, full_
         if m:
             parts.append(f"{m.group(1)}°C {m.group(2)}°C температура")
 
-    return " | ".join(filter(None, parts))[:10000]
+    # Add all variant SKUs also as plain space-separated tokens at the end
+    # This ensures ILIKE '%TI-A101-08-08%' always finds them
+    sku_tokens = []
+    SKU_KEYS_B = ["_sku","Індекс","Indeks","Index","SKU","Артикул"]
+    for var in (variants or []):
+        for sk in SKU_KEYS_B:
+            if sk in var and var[sk] and str(var[sk]).strip():
+                v = str(var[sk]).strip()
+                if len(v) >= 4:
+                    sku_tokens.append(v)
+                    sku_tokens.append(v.replace("-","").replace("_","").replace("/",""))
+
+    joined = " | ".join(filter(None, parts))
+    if sku_tokens:
+        joined += " " + " ".join(sku_tokens)
+    return joined[:10000]
 
 
 # ── OpenAI embedding ──────────────────────────────────────────────────────────
