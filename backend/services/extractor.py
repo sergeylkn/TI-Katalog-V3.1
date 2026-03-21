@@ -1,70 +1,79 @@
 import logging
-import httpx
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from models.models import Document, Section
-from services.extractor import extract_products
+from typing import Any, Dict, List
 
-logger = logging.getLogger("services.importer")
+# МИ НЕ ІМПОРТУЄМО Document ТУТ, щоб уникнути Circular Import
+# Ми імпортуємо Product всередині функції або використовуємо загальний об'єкт
 
-MANIFEST_URL = "https://pub-ada201ec5fb84401a3b36b7b21e6ed0f.r2.dev/manifest.txt"
-BASE_R2_URL = "https://pub-ada201ec5fb84401a3b36b7b21e6ed0f.r2.dev/"
+logger = logging.getLogger("extractor")
 
-async def run_import_all(db: AsyncSession):
-    """Основна функція імпорту всіх PDF з маніфесту."""
-    logger.info("🔄 R2 import starting...")
+def safe_list_to_str(value: Any, separator: str = "; ") -> str:
+    if value is None: return ""
+    if isinstance(value, list):
+        return separator.join([str(i).strip() for i in value if i is not None])
+    return str(value).strip()
+
+async def extract_products(db, doc, products_data: Any, page_num: int) -> int:
+    """
+    Зберігає товари. Ми імпортуємо Product локально, 
+    щоб не було циклічної залежності.
+    """
+    from models.models import Product  # ЛОКАЛЬНИЙ ІМПОРТ
     
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(MANIFEST_URL)
-            if response.status_code != 200:
-                logger.error(f"Не вдалося завантажити маніфест: {response.status_code}")
-                return {"error": "Manifest download failed"}
+    added_count = 0
+    items = []
+    
+    if isinstance(products_data, dict):
+        items = products_data.get("products", [])
+    elif isinstance(products_data, list):
+        items = products_data
+    else:
+        logger.error(f"Doc#{doc.id} p{page_num}: Invalid format")
+        return 0
+
+    for p_data in items:
+        try:
+            if not isinstance(p_data, dict): continue
+
+            title = p_data.get("title") or p_data.get("name") or "Без назви"
+            sku = p_data.get("sku") or p_data.get("article") or ""
             
-            lines = response.text.splitlines()
-            pdf_filenames = [line.strip() for line in lines if line.strip().endswith('.pdf')]
-            logger.info(f"Знайдено в маніфесті: {len(pdf_filenames)} PDF")
+            # Виправлення для PostgreSQL (список у рядок)
+            certs = safe_list_to_str(p_data.get("certifications", ""))
+            
+            # Безпечне отримання JSON полів
+            attributes = p_data.get("attributes", {})
+            if not isinstance(attributes, dict): attributes = {"raw": str(attributes)}
+            
+            variants = p_data.get("variants", [])
+            if not isinstance(variants, list): variants = []
 
-            added_count = 0
-            for filename in pdf_filenames:
-                # 1. Перевіряємо, чи існує документ
-                stmt = select(Document).where(Document.name == filename)
-                res = await db.execute(stmt)
-                doc = res.scalar_one_or_none()
+            # Пошуковий індекс
+            search_text = f"{title} {sku} {certs}".lower()
 
-                if not doc:
-                    # 2. Створюємо новий документ, якщо його немає
-                    file_url = f"{BASE_R2_URL}{filename}"
-                    doc = Document(
-                        name=filename,
-                        file_url=file_url,
-                        status="pending"
-                    )
-                    db.add(doc)
-                    await db.commit()
-                    await db.refresh(doc)
-                    added_count += 1
-                
-                # 3. Запускаємо парсинг (якщо статус pending)
-                if doc.status == "pending":
-                    try:
-                        # Важливо: передаємо об'єкт doc, у якого точно є .id
-                        await process_single_pdf(doc, db)
-                    except Exception as e:
-                        logger.error(f"Помилка парсингу {filename}: {e}")
+            new_product = Product(
+                document_id=doc.id,
+                section_id=doc.section_id,
+                title=str(title)[:255],
+                sku=str(sku)[:100],
+                description=str(p_data.get("description", "")),
+                certifications=certs,
+                attributes=attributes,
+                variants=variants,
+                page_number=page_num,
+                search_text=search_text
+            )
+            db.add(new_product)
+            added_count += 1
+            
+        except Exception as e:
+            logger.error(f"Error processing item: {e}")
+            continue
 
-            return {"status": "success", "added": added_count}
-
+    try:
+        await db.commit()
     except Exception as e:
-        logger.error(f"Глобальна помилка імпорту: {e}")
-        return {"error": str(e)}
-
-async def process_single_pdf(doc: Document, db: AsyncSession):
-    """Функція для обробки одного конкретного PDF."""
-    logger.info(f"📄 Початок обробки: {doc.name}")
-    
-    # Тут виклик вашого екстрактора
-    # Приклад: витягуємо дані через Claude і зберігаємо через нашу нову функцію
-    # Замініть на вашу реальну логіку виклику Claude
-    # await extract_products(db, doc, ai_data, page_num)
-    pass
+        await db.rollback()
+        logger.error(f"DB Commit failed: {e}")
+        return 0
+        
+    return added_count
