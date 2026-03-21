@@ -115,8 +115,8 @@ async def _vec(q: str, n: int = 40) -> List[int]:
         from core.database import engine
         async with engine.connect() as conn:
             res = await conn.execute(
-                text('SELECT id FROM products WHERE embedding IS NOT NULL ORDER BY embedding <=> :e::vector LIMIT :l'),
-                {'e': str(emb), 'l': n})
+                text('SELECT id FROM products WHERE embedding IS NOT NULL ORDER BY embedding <=> CAST($1 AS vector) LIMIT $2'),
+                [str(emb), n])
             return [row[0] for row in res.fetchall()]
     except Exception as e:
         logger.debug(f'vec: {e}'); return []
