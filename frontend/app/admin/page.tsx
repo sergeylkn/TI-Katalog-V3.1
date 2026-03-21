@@ -32,6 +32,7 @@ export default function AdminPage() {
   const [parseLogs, setParseLogs] = useState<any[]>([])
   const [msg, setMsg] = useState('')
   const [msgType, setMsgType] = useState<'ok'|'err'>('ok')
+  const [indexStats, setIndexStats] = useState<any>(null)
   const timer = useRef<any>(null)
 
   const notify = (text: string, type: 'ok'|'err' = 'ok') => {
@@ -41,10 +42,12 @@ export default function AdminPage() {
 
   const refresh = async () => {
     try {
-      const [s, l, pl, env] = await Promise.all([
+      const [s, l, pl, env, idxSt] = await Promise.all([
         api.importStatus(), api.importLogs(60), api.parseLogs(60),
         fetch(`${API}/api/admin/env-status`).then(r => r.json()),
+        fetch(`${API}/api/admin/index-stats`).then(r => r.json()).catch(() => null),
       ])
+      setIndexStats(idxSt)
       setStatus(s)
       setLogs(l.logs || [])
       setParseLogs(pl.logs || [])
@@ -270,10 +273,36 @@ export default function AdminPage() {
               onClick={doClear}>
               🗑 Очистити БД
             </button>
+            <button className="btn btn-ghost" style={{ color: '#185FA5', borderColor: 'rgba(24,95,165,.4)' }}
+              onClick={async () => {
+                try {
+                  await fetch(`${API}/api/admin/rebuild-indexes`, { method: 'POST' })
+                  notify('✅ Перебудова індексів запущена (~1-2 хв)')
+                  setTimeout(refresh, 10000)
+                } catch { notify('❌ Помилка', 'err') }
+              }}>
+              🔍 Перебудувати індекси артикулів
+            </button>
           </div>
           <p style={{ fontSize: 12, color: 'var(--text3)', marginTop: 10 }}>
             Час імпорту: ~15-20 хв для 189 PDF · Вартість embeddings: ~$0.02
           </p>
+          {/* Index stats */}
+          {indexStats && (
+            <div style={{
+              marginTop: 12, padding: '10px 14px', borderRadius: 'var(--radius)',
+              background: 'var(--bg2)', fontSize: 12, color: 'var(--text2)',
+              display: 'flex', gap: 20, flexWrap: 'wrap',
+            }}>
+              <span>🔍 Індекс артикулів: <strong style={{ color: 'var(--text)', fontFamily: 'var(--font-mono)' }}>{indexStats.total_indexes?.toLocaleString() || 0}</strong> записів</span>
+              {indexStats.by_type && Object.entries(indexStats.by_type).map(([k, v]: any) => (
+                <span key={k}>{k}: <strong style={{ color: 'var(--text)' }}>{v}</strong></span>
+              ))}
+              {(!indexStats.total_indexes || indexStats.total_indexes === 0) && (
+                <span style={{ color: '#A32D2D' }}>⚠️ Індекс порожній — натисніть "Перебудувати індекси"</span>
+              )}
+            </div>
+          )}
         </div>
 
         {/* ── LOGS ── */}

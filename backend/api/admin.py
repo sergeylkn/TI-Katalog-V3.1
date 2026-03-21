@@ -127,3 +127,36 @@ async def env_status():
         "DATABASE_URL":      _check("DATABASE_URL"),
         "PORT":              _check("PORT"),
     }
+
+
+@router.post("/rebuild-indexes")
+async def rebuild_indexes(bg: BackgroundTasks):
+    """
+    Rebuild product_indexes table from existing products.variants JSON.
+    No PDF re-download — reads from DB only. Run this once after deployment.
+    """
+    async def _do():
+        from core.database import AsyncSessionLocal
+        from services.indexer import rebuild_all_indexes
+        async with AsyncSessionLocal() as db:
+            count = await rebuild_all_indexes(db)
+            logger.info(f"rebuild-indexes done: {count} indexes")
+
+    bg.add_task(_do)
+    return {"status": "started", "message": "Rebuilding indexes in background..."}
+
+
+@router.get("/index-stats")
+async def index_stats(db: AsyncSession = Depends(get_db)):
+    """Show stats about product_indexes table."""
+    from models.models import ProductIndex
+    from sqlalchemy import func
+    total = (await db.execute(select(func.count(ProductIndex.id)))).scalar_one()
+    by_type = (await db.execute(
+        select(ProductIndex.index_type, func.count(ProductIndex.id))
+        .group_by(ProductIndex.index_type)
+    )).all()
+    return {
+        "total_indexes": total,
+        "by_type": {row[0]: row[1] for row in by_type},
+    }

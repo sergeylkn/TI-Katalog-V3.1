@@ -26,7 +26,7 @@ def _prod(p: Product, doc: Document = None) -> dict:
         "document_id": p.document_id, "section_id": p.section_id,
         "category_id": p.category_id,
         "document_url": doc.file_url if doc else "",
-        "image_url": f"/api/products/{p.id}/image" if p.image_bbox else "",
+        "image_url": f"/api/products/{p.id}/image" if (p.image_bbox or p.page_number) else "",
     }
 
 
@@ -62,17 +62,19 @@ async def product_image(product_id: int, db: AsyncSession = Depends(get_db)):
         page = pdfdoc[min(pnum, len(pdfdoc) - 1)]
 
         if bbox:
-            # Render specific bbox region
+            # Render specific bbox — product image area
             clip = fitz.Rect(
-                bbox["x0"] - 4, bbox["y0"] - 4,
-                bbox["x1"] + 4, bbox["y1"] + 4
+                bbox["x0"] - 6, bbox["y0"] - 6,
+                bbox["x1"] + 6, bbox["y1"] + 6
             )
+            mat = fitz.Matrix(2.5, 2.5)
         else:
-            # Render top-left quadrant of page as fallback
+            # No bbox: render full page scaled to thumbnail
             r = page.rect
-            clip = fitz.Rect(0, r.height * 0.1, r.width * 0.5, r.height * 0.6)
+            # Try to find image area heuristically (left portion, skip header)
+            clip = fitz.Rect(0, r.height * 0.08, r.width * 0.52, r.height * 0.65)
+            mat = fitz.Matrix(1.5, 1.5)
 
-        mat = fitz.Matrix(2.0, 2.0)
         pix = page.get_pixmap(matrix=mat, clip=clip)
         img_bytes = pix.tobytes("png")
         pdfdoc.close()

@@ -109,19 +109,35 @@ def _build_search_text(title, subtitle, sku, attrs, variants, description, full_
     for k, v in (attrs or {}).items():
         parts.append(f"{k} {v}")
 
-    # Variant SKUs and diameters
+    # Variant SKUs — EVERY index must be searchable
+    SKU_KEYS = ["_sku","Індекс","Indeks","Index","index","Article","SKU","Артикул","КОД","код","Part No","PartNo"]
+    DN_KEYS  = ["DN","d вн.","d вн","Dw","ID","d_in","d вн.(мм)","Ду","di","D внутр","внутр.д"]
+    
     for var in (variants or []):
-        vsku = var.get("_sku") or var.get("Індекс") or var.get("Indeks", "")
-        if vsku: parts.append(vsku)
-        # Add numeric values from variants — inner diameter gets extra weight
+        # Extract and add ALL possible SKU/index values
+        for sk in SKU_KEYS:
+            if sk in var and var[sk] and str(var[sk]).strip():
+                vsku = str(var[sk]).strip()
+                parts.append(vsku)
+                # Also add without dashes for fuzzy match
+                parts.append(vsku.replace("-","").replace("_",""))
+        
+        # Extract DN/inner diameter values
+        for dk in DN_KEYS:
+            if dk in var and var[dk] and str(var[dk]).strip():
+                vdn = str(var[dk]).strip()
+                try:
+                    dn_int = int(float(vdn))
+                    parts.append(f"DN{dn_int} {dn_int}мм {dn_int}mm")
+                except ValueError:
+                    pass
+                break
+        
+        # Add all numeric values for technical matching
         for vk, vv in var.items():
-            if vk == "_sku": continue
+            if vk == "_sku" or vk in SKU_KEYS: continue
             if vv and re.search(r'\d', str(vv)):
                 parts.append(str(vv))
-                # If looks like inner diameter column
-                vk_l = vk.lower()
-                if any(x in vk_l for x in ("вн", "inner", "d_в", "dn", "id", "di")):
-                    parts.append(f"DN{vv} {vv}мм {vv}mm")
 
     if description: parts.append(description[:800])
 
@@ -395,6 +411,14 @@ async def extract_products(
                         await db.commit()
                     except Exception:
                         pass
+
+                # Build search index for all variant SKUs
+                try:
+                    from services.indexer import index_product
+                    await index_product(prod, db)
+                    await db.commit()
+                except Exception as ie:
+                    logger.debug(f"Index product#{prod.id}: {ie}")
 
                 saved.append(prod)
                 logger.info(

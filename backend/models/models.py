@@ -88,6 +88,25 @@ class Product(Base):
     )
 
 
+
+class ProductIndex(Base):
+    """
+    Flat index of every searchable identifier:
+    - product own SKU
+    - every variant SKU/index from variants JSON
+    One row per identifier. Allows instant lookup by any article number.
+    """
+    __tablename__ = "product_indexes"
+    id          = Column(Integer, primary_key=True, autoincrement=True)
+    product_id  = Column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False)
+    index_value = Column(String(200), nullable=False)   # uppercase, normalized
+    index_type  = Column(String(20), nullable=False)    # "sku" | "variant" | "alt"
+    variant_row = Column(JSON, nullable=True)           # full variant data for this index
+    __table_args__ = (
+        Index("ix_product_indexes_value", "index_value"),
+        Index("ix_product_indexes_product", "product_id"),
+    )
+
 class ImportLog(Base):
     __tablename__ = "import_logs"
     id            = Column(Integer, primary_key=True, autoincrement=True)
