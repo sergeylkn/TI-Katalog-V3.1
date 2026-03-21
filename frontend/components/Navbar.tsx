@@ -3,22 +3,11 @@ import { useState, useEffect, useRef } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { api } from '@/lib/api'
-
-const T: Record<string, Record<string, string>> = {
-  ua: {
-    catalog: 'Каталог', search: 'Пошук...', hint: 'UA · PL · EN',
-    placeholder: 'Пошук: шланг DN65, FT-CRISTALLO...',
-    shop: 'Онлайн магазин →', contact: 'tubes@tubes-international.com',
-  },
-  pl: {
-    catalog: 'Katalog', search: 'Szukaj...', hint: 'UA · PL · EN',
-    placeholder: 'Szukaj: wąż DN65, FT-CRISTALLO...',
-    shop: 'Sklep online →', contact: 'tubes@tubes-international.com',
-  },
-}
+import { useLang } from '@/lib/useLang'
+import { t, categoryName } from '@/lib/translations'
 
 export default function Navbar() {
-  const [lang, setLang] = useState<'ua'|'pl'>('ua')
+  const [lang, setLang] = useLang()
   const [dark, setDark] = useState(false)
   const [q, setQ] = useState('')
   const [suggs, setSuggs] = useState<any[]>([])
@@ -27,11 +16,20 @@ export default function Navbar() {
   const timer = useRef<any>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
 
-  const t = T[lang]
-
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light')
   }, [dark])
+
+  useEffect(() => {
+    const saved = localStorage.getItem('ti_dark')
+    if (saved === '1') setDark(true)
+  }, [])
+
+  const toggleDark = () => {
+    const next = !dark
+    setDark(next)
+    localStorage.setItem('ti_dark', next ? '1' : '0')
+  }
 
   useEffect(() => {
     if (q.length < 2) { setSuggs([]); setSuggOpen(false); return }
@@ -47,9 +45,8 @@ export default function Navbar() {
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node))
         setSuggOpen(false)
-      }
     }
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
@@ -63,42 +60,33 @@ export default function Navbar() {
 
   return (
     <>
-      {/* Top bar */}
       <div className="topbar">
-        <span>📍 {lang === 'ua' ? 'Промисловий каталог · Україна' : 'Katalog przemysłowy · Ukraina'}</span>
+        <span>📍 {t('topbar', lang)}</span>
         <div className="topbar-right">
-          <a href="mailto:tubes@tubes-international.com">{t.contact}</a>
-          <a href="https://sklep.tubes-international.pl" target="_blank" rel="noopener noreferrer" className="topbar-shop">{t.shop}</a>
+          <a href="mailto:tubes@tubes-international.com">tubes@tubes-international.com</a>
+          <a href="https://sklep.tubes-international.pl" target="_blank" rel="noopener noreferrer" className="topbar-shop">
+            {t('shop', lang)}
+          </a>
         </div>
       </div>
 
-      {/* Main navbar */}
       <nav className="navbar">
         <Link href="/" className="nav-logo">TI<span>·</span>Каталог</Link>
 
         <div className="nav-links">
-          <Link href="/" className="nav-link">{t.catalog}</Link>
-          <Link href="/catalog/shlanhy-dlya-promyslovosti" className="nav-link">
-            {lang === 'ua' ? 'Шланги' : 'Węże'}
-          </Link>
-          <Link href="/catalog/promyslova-armatura" className="nav-link">
-            {lang === 'ua' ? 'Арматура' : 'Armatura'}
-          </Link>
-          <Link href="/catalog/sylova-hidravlika" className="nav-link">
-            {lang === 'ua' ? 'Гідравліка' : 'Hydraulika'}
-          </Link>
-          <Link href="/catalog/promyslova-pnevmatyka" className="nav-link">
-            {lang === 'ua' ? 'Пневматика' : 'Pneumatyka'}
-          </Link>
+          <Link href="/" className="nav-link">{t('catalog', lang)}</Link>
+          <Link href="/catalog/shlanhy-dlya-promyslovosti" className="nav-link">{t('hoses', lang)}</Link>
+          <Link href="/catalog/promyslova-armatura" className="nav-link">{t('fittings', lang)}</Link>
+          <Link href="/catalog/sylova-hidravlika" className="nav-link">{t('hydraulics', lang)}</Link>
+          <Link href="/catalog/promyslova-pnevmatyka" className="nav-link">{t('pneumatics', lang)}</Link>
         </div>
 
-        {/* Search */}
         <div className="nav-search" ref={wrapRef}>
           <form onSubmit={doSearch}>
             <input
               value={q}
               onChange={e => setQ(e.target.value)}
-              placeholder={t.placeholder}
+              placeholder={t('searchPlaceholder', lang)}
               autoComplete="off"
             />
             <button type="submit" className="nav-search-btn">⌕</button>
@@ -110,7 +98,7 @@ export default function Navbar() {
                 setSuggOpen(false)
                 setQ(s.title)
               }}>
-                <span className="sugg-type">{s.sku ? 'SKU' : 'Товар'}</span>
+                <span className="sugg-type">{s.sku ? 'SKU' : t('catalog', lang)}</span>
                 <span>{s.title}</span>
                 {s.sku && <span className="sugg-sku">{s.sku}</span>}
               </div>
@@ -118,7 +106,6 @@ export default function Navbar() {
           </div>
         </div>
 
-        {/* Controls */}
         <div className="nav-controls">
           <button className={`lang-btn ${lang === 'ua' ? 'active' : ''}`} onClick={() => setLang('ua')}>
             🇺🇦 UA
@@ -126,7 +113,7 @@ export default function Navbar() {
           <button className={`lang-btn ${lang === 'pl' ? 'active' : ''}`} onClick={() => setLang('pl')}>
             🇵🇱 PL
           </button>
-          <button className="theme-btn" onClick={() => setDark(!dark)}>
+          <button className="theme-btn" onClick={toggleDark}>
             {dark ? '☀️' : '🌙'}
           </button>
         </div>
