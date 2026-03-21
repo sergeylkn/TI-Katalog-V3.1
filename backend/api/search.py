@@ -17,6 +17,156 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # ── Polish → Ukrainian/English ────────────────────────────────────────────────
+# ── Russian → Ukrainian/English keyword mapping ───────────────────────────────
+RU_MAP = {
+    # Шланги
+    "шланг":             "шланг hose",
+    "шлангов":           "шланг hose",
+    "рукав":             "рукав шланг hose",
+    "рукава":            "рукав шланг hose",
+    "трубопровод":       "шланг трубопровід pipe",
+    "труба":             "труба трубопровід pipe",
+    "трубка":            "трубка tube",
+    # Матеріали
+    "резиновый":         "гумовий rubber",
+    "резиновая":         "гумова rubber",
+    "силиконовый":       "силіконовий silicone",
+    "силиконовая":       "силіконова silicone",
+    "пищевой":           "харчовий food",
+    "пищевая":           "харчова food",
+    "химический":        "хімічний chemical",
+    "химическая":        "хімічна chemical",
+    "нержавейка":        "нержавіюча stainless",
+    "нержавеющий":       "нержавіюча stainless",
+    "латунный":          "латунний brass",
+    "латунная":          "латунна brass",
+    "стальной":          "сталевий steel",
+    "стальная":          "сталева steel",
+    "чугунный":          "чавунний cast iron",
+    "пластиковый":       "пластиковий plastic",
+    # Гідравліка
+    "гидравлический":    "гідравлічний hydraulic",
+    "гидравлическая":    "гідравлічна hydraulic",
+    "гидравлика":        "гідравліка hydraulic",
+    "насос":             "насос pump",
+    "цилиндр":           "циліндр cylinder",
+    "гидроцилиндр":      "гідроциліндр hydraulic cylinder",
+    # Пневматика
+    "пневматический":    "пневматичний pneumatic",
+    "пневматическая":    "пневматична pneumatic",
+    "пневматика":        "пневматика pneumatic",
+    "воздушный":         "повітряний air",
+    # Арматура / з'єднання
+    "соединение":        "з'єднання fitting connection",
+    "соединения":        "з'єднання fitting connection",
+    "фитинг":            "фітинг fitting",
+    "фитинги":           "фітинги fittings",
+    "адаптер":           "адаптер adapter",
+    "переходник":        "перехідник adapter",
+    "муфта":             "муфта coupling",
+    "кран":              "кран valve",
+    "шаровый кран":      "кульовий кран ball valve",
+    "шаровой кран":      "кульовий кран ball valve",
+    "клапан":            "клапан valve",
+    "обратный клапан":   "зворотний клапан check valve",
+    "манометр":          "манометр gauge pressure",
+    "хомут":             "хомут clamp",
+    "хомуты":            "хомути clamps",
+    "обойма":            "обойма clamp",
+    "фланец":            "фланець flange",
+    "фланцевый":         "фланцевий flange",
+    "штуцер":            "штуцер fitting",
+    "ниппель":           "ніпель nipple",
+    "угольник":          "кутник elbow",
+    "тройник":           "трійник tee",
+    "заглушка":          "заглушка plug cap",
+    "уплотнение":        "ущільнення seal",
+    "прокладка":         "прокладка gasket",
+    "быстросъемное":     "швидкороз'ємне quick connect",
+    "быстроразъемное":   "швидкороз'ємне quick disconnect",
+    "камлок":            "camlock",
+    "камелок":           "camlock",
+    # Технічні параметри (включно з розмітками ДН → DN)
+    "давление":          "тиск pressure",
+    "диаметр":           "діаметр diameter",
+    "внутренний":        "внутрішній inner",
+    "наружный":          "зовнішній outer",
+    "наружний":          "зовнішній outer",
+    "рабочее давление":  "робочий тиск working pressure",
+    "температура":       "температура temperature",
+    "рабочая температура": "робоча температура working temperature",
+    # Застосування
+    "нефть":             "нафта oil petroleum",
+    "нефтепродукты":     "нафтопродукти petroleum",
+    "масло":             "масло oil",
+    "вода":              "вода water",
+    "воздух":            "повітря air",
+    "пар":               "пара steam",
+    "газ":               "газ gas",
+    "топливо":           "паливо fuel",
+    "пескоструй":        "піскоструминний sandblast",
+    "пескоструйный":     "піскоструминний sandblast",
+    "пищевая промышленность": "харчова промисловість food industry",
+    "промышленность":    "промисловість industry",
+    "сельское хозяйство": "сільське господарство agriculture",
+    # Одиниці виміру
+    "бар":               "bar",
+    "атм":               "bar",
+    "кгс":               "bar",
+}
+
+
+def _is_russian(q: str) -> bool:
+    """Detect if query contains Russian (not Ukrainian) text."""
+    ua_specific_chars = {"і", "ї", "є", "ґ"}
+    # Common Ukrainian words that share chars with Russian
+    ua_words = {"шланг", "харчовий", "харчова", "кран", "клапан", "тиск",
+                "рукав", "фітинг", "з'єднання", "нержавіюча", "гідравлічний",
+                "пневматичний", "хомут", "манометр", "насос"}
+    # Russian-specific words (not used in Ukrainian)
+    ru_words = {"гидравлический", "гидравлическ", "пневматический", "пневматическ",
+                "соединение", "давление", "рукава", "шлангов", "нержавейка",
+                "пищевых", "пищевой", "пищевая", "химический", "химическ",
+                "диаметр", "резиновый", "резинов", "латунный", "стальной",
+                "фитинг", "угольник", "тройник", "заглушка", "уплотнение",
+                "продуктов", "промышленн", "сельского", "воздушный", "воздушн",
+                "нефтепродукт", "топливный", "быстросъем", "быстроразъем",
+                "температурн", "рабочего", "рабочей", "рабочий"}
+    q_l = q.lower()
+    cyrillic = [c for c in q_l if "\u0400" <= c <= "\u04FF"]
+    if not cyrillic:
+        return False
+    if set(cyrillic) & ua_specific_chars:
+        return False  # has Ukrainian-specific letters
+    # Check Russian-specific words first (they override ambiguous shared words)
+    has_ru_words = any(w in q_l for w in ru_words)
+    has_ua_words = any(w in q_l for w in ua_words)
+    if has_ru_words and not has_ua_words:
+        return True   # purely Russian terms
+    if has_ru_words and has_ua_words:
+        return True   # mixed but has Russian - still translate (adds UA equivalents)
+    if has_ua_words:
+        return False  # Ukrainian words without Russian
+    # Default: ambiguous, treat as Ukrainian (safer)
+    return False
+
+
+def _ru_to_ua(q: str) -> str:
+    """Translate Russian query terms to Ukrainian/English equivalents."""
+    if not _is_russian(q):
+        return q
+    result = q
+    q_l = q.lower()
+    # Apply longer phrases first (more specific)
+    for ru, ua_en in sorted(RU_MAP.items(), key=lambda x: -len(x[0])):
+        if ru in q_l:
+            result += " " + ua_en
+    # Russian ДН → DN (same as Ukrainian дн)
+    result = re.sub(r"\bДН\s*(\d+)\b", lambda m: f"DN{m.group(1)}", result, flags=re.I)
+    result = re.sub(r"\bДН\b", "DN", result, flags=re.I)
+    return result
+
+
 PL_MAP = {
     "wąż":"шланг hose", "węże":"шланги hoses", "przewód":"шланг труба",
     "złącze":"з'єднання фітинг", "zawór":"клапан кран", "armatura":"арматура",
@@ -51,6 +201,10 @@ CATEGORY_HINTS = {
     "bauer": ["bauer","важільне"],
     "guillemin": ["guillemin"],
     "storz": ["storz"],
+    # Russian keywords
+    "рукав": ["шланг","рукав","hose"],
+    "соединение": ["з'єднання","фітинг","fitting"],
+    "фитинг": ["фітинг","з'єднання","fitting"],
 }
 
 
@@ -63,12 +217,15 @@ def _normalize_q(q: str) -> str:
 
 
 def _expand_q(q: str) -> str:
-    """Add Polish/English equivalents."""
+    """Translate RU→UA, add Polish/English equivalents."""
     r = _normalize_q(q)
-    q_l = q.lower()
+    # Russian translation (adds UA/EN equivalents)
+    r = _ru_to_ua(r)
+    q_l = r.lower()
+    # Polish expansion
     for pl, ua in PL_MAP.items():
         if pl in q_l:
-            r += ' ' + ua
+            r += " " + ua
     return r
 
 

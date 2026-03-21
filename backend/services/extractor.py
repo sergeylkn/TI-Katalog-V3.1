@@ -1,11 +1,15 @@
 """
-PDF Extractor v5.2
-- Pure regex, $0 import cost
-- Normalized technical attributes (bar, DN, temp, diameter)
-- Rich search_text with all searchable values
-- OpenAI embeddings after save
+Smart PDF Extractor v6 — Claude Haiku + PyMuPDF.
+
+Стратегія:
+1. PyMuPDF витягує текст + таблиці (безкоштовно, швидко)
+2. Claude Haiku (~$0.0001/стор) аналізує текст → структуровані дані
+3. Fallback regex якщо Haiku недоступний
+
+Результат: точні назви, DN/bar/temp/матеріал, всі SKU варіантів.
 """
 import asyncio
+import json
 import logging
 import os
 import re
@@ -19,160 +23,107 @@ try:
 except ImportError:
     _FITZ = False
 
-# ── Labels to search for in PDF text ──────────────────────────────────────────
-SPEC_LABELS = [
-    "Матеріал шлангу", "Внутрішній шар", "Зовнішній шар", "Середній шар",
-    "Армування", "Робоча температура", "Робоча темп", "Температура",
-    "Матеріал", "Тиск", "Робочий тиск", "Вакуум", "Застосування",
-    "Стандарт", "Колір", "Довжина", "Маса", "Вага",
-]
-
-SKU_PATTERN = re.compile(r'\b([A-Z]{2,6}[-_][A-Z0-9][-A-Z0-9/]{3,30})\b')
-CERT_PATTERN = re.compile(
-    r'(?:1935/2004|10/2011|2023/2006|FDA\s*21|ISO\s*\d+|EN\s*\d+|DIN\s*\d+|'
-    r'RoHS|REACH|WRAS|UL94|MSHA)[^\n]{0,120}',
+# ── Patterns ──────────────────────────────────────────────────────────────────
+_SKU_PAT  = re.compile(r'\b([A-Z]{2,8}[-_][A-Z0-9][-A-Z0-9/_\.]{2,30})\b')
+_DN_RE    = re.compile(r'\bDN\s*(\d+)\b', re.I)
+_BAR_RE   = re.compile(r'(\d+[\.,]?\d*)\s*(?:bar|BAR|бар)\b')
+_TEMP_RE  = re.compile(r'([+-]?\d+)\s*°?\s*[Cc°]\s*(?:do|до|[~–-])\s*([+-]?\d+)\s*°?\s*[Cc°]', re.I)
+_TEMP1_RE = re.compile(r'(?:від|від\s*\+?|від\s*)([+-]?\d+)', re.I)
+_DIAM_RE  = re.compile(r'\b(\d+[\.,]?\d*)\s*[xX×]\s*(\d+[\.,]?\d*)\s*mm', re.I)
+_CERT_PAT = re.compile(
+    r'(?:1935/2004|10/2011|FDA\s*21|ISO\s*\d+|EN\s*\d+|DIN\s*\d+|'
+    r'RoHS|REACH|WRAS|UL\s*94|MSHA|NSF)[^\n]{0,120}',
     re.IGNORECASE
 )
 
-# ── Technical value extraction patterns ───────────────────────────────────────
-# bar/pressure
-_BAR_RE   = re.compile(r'(\d+[\.,]?\d*)\s*(?:bar|BAR|бар|MPa)', re.I)
-# temperature ranges like "-20°C do +60°C" or "-20 +60"
-_TEMP_RE  = re.compile(r'([+-]?\d+)\s*°?\s*[Cc°]\s*(?:do|до|[+~–-])\s*([+-]?\d+)\s*°?\s*[Cc°]', re.I)
-_TEMP1_RE = re.compile(r'(?:до|до\s*\+?|max\.?\s*)([+-]?\d+)\s*°?\s*[Cc]', re.I)
-# DN
-_DN_RE    = re.compile(r'\bDN\s*(\d+)\b', re.I)
-# diameter inner x outer: 25x35 or 25/35 mm
-_DIAM_RE  = re.compile(r'\b(\d+[\.,]?\d*)\s*[xX×]\s*(\d+[\.,]?\d*)\s*mm', re.I)
-_DIAM1_RE = re.compile(r'\bø?\s*(\d+[\.,]?\d*)\s*mm\b', re.I)
+SKIP_WORDS = {
+    "www.", "tubes-international", "Tel:", "Fax:", "e-mail:",
+    "TI-Katalog", "KATALOG", "Сторінка", "Page", "©",
+}
+
+# ── Claude Haiku extractor ────────────────────────────────────────────────────
+HAIKU_SYSTEM = """Ти — парсер промислового PDF каталогу.
+Витягуй дані про продукт і повертай JSON. ТІЛЬКИ JSON, без пояснень.
+
+Правила:
+- title: назва продукту/моделі (не категорія і не назва компанії)
+- subtitle: короткий опис призначення (1 рядок)
+- material: матеріал (гума/ПВХ/силікон/нержавіюча сталь/латунь/поліуретан тощо)
+- dn_mm: внутрішній діаметр в мм (число або null)
+- bar_max: максимальний робочий тиск в bar (число або null)  
+- temp_min: мінімальна температура °C (число або null)
+- temp_max: максимальна температура °C (число або null)
+- application: застосування (харчова/хімічна/нафтова/повітря/вода/гідравліка/пара тощо)
+- certifications: список сертифікатів або null
+- sku: головний артикул/індекс або null
+- description: опис продукту 1-3 речення
+
+Якщо дані не знайдено — null, не вигадуй."""
+
+HAIKU_EXTRACT_PROMPT = """Текст зі сторінки PDF каталогу промислових шлангів/арматури:
+
+{page_text}
+
+Таблиця варіантів (якщо є):
+{table_text}
+
+Витягни дані продукту і поверни JSON з полями:
+title, subtitle, material, dn_mm, bar_max, temp_min, temp_max, application, certifications, sku, description"""
 
 
-def _normalize_attrs(raw_attrs: Dict[str, str], full_text: str) -> Dict[str, str]:
-    """
-    Enhance raw attributes with normalized technical values extracted from full page text.
-    Always adds: bar, temp_min, temp_max, dn, d_inner, d_outer where found.
-    """
-    attrs = dict(raw_attrs)
+async def _haiku_extract(page_text: str, table_text: str) -> Optional[dict]:
+    """Use Claude Haiku to extract structured product data from page text."""
+    key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not key:
+        return None
 
-    # Pressure in bar
-    bars = _BAR_RE.findall(full_text)
-    if bars:
-        # Take the most common / largest reasonable value
-        bar_vals = [float(b.replace(",", ".")) for b in bars if float(b.replace(",","."))<1000]
-        if bar_vals:
-            attrs["Тиск_бар"] = str(max(bar_vals))
+    # Trim text to fit context
+    page_trimmed = page_text[:3000]
+    table_trimmed = table_text[:1000] if table_text else "немає"
 
-    # Temperature range
-    m = _TEMP_RE.search(full_text)
-    if m:
-        attrs["Темп_мін"] = m.group(1)
-        attrs["Темп_макс"] = m.group(2)
-    else:
-        m1 = _TEMP1_RE.search(full_text)
-        if m1:
-            attrs["Темп_макс"] = m1.group(1)
+    prompt = HAIKU_EXTRACT_PROMPT.format(
+        page_text=page_trimmed,
+        table_text=table_trimmed,
+    )
 
-    # DN = Номінальний діаметр = внутрішній діаметр шланга
-    dns = _DN_RE.findall(full_text)
-    if dns:
-        attrs["DN"] = dns[0]
-        attrs["d_вн_мм"] = dns[0]   # DN = внутрішній діаметр
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 600,
+                    "system": HAIKU_SYSTEM,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+            if r.status_code != 200:
+                logger.debug(f"Haiku API error: {r.status_code}")
+                return None
 
-    # Explicit inner x outer diameters e.g. 25x35mm
-    m = _DIAM_RE.search(full_text)
-    if m:
-        attrs["d_вн_мм"]  = m.group(1)   # inner = left number
-        attrs["d_зовн_мм"] = m.group(2)   # outer = right number
-        if not attrs.get("DN"):
-            attrs["DN"] = m.group(1)       # DN ≈ inner diameter
-    else:
-        diams = _DIAM1_RE.findall(full_text)
-        if diams and not attrs.get("d_вн_мм"):
-            attrs["d_вн_мм"] = diams[0]
+        text = r.json()["content"][0]["text"].strip()
 
-    return attrs
+        # Strip markdown code fences if present
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
 
+        return json.loads(text)
 
-def _build_search_text(title, subtitle, sku, attrs, variants, description, full_text="") -> str:
-    """
-    Denormalized searchable text. Includes:
-    - All title/subtitle/sku
-    - All attribute values (including normalized bar/DN/temp)
-    - All variant SKUs and key values
-    - Key numbers extracted from description
-    """
-    parts = [title or ""]
-    if subtitle:  parts.append(subtitle)
-    if sku:       parts.append(sku)
-
-    # All attribute values
-    for k, v in (attrs or {}).items():
-        parts.append(f"{k} {v}")
-
-    # Variant SKUs — EVERY index must be searchable
-    SKU_KEYS = ["_sku","Індекс","Indeks","Index","index","Article","SKU","Артикул","КОД","код","Part No","PartNo"]
-    DN_KEYS  = ["DN","d вн.","d вн","Dw","ID","d_in","d вн.(мм)","Ду","di","D внутр","внутр.д"]
-    
-    for var in (variants or []):
-        # Extract and add ALL possible SKU/index values
-        for sk in SKU_KEYS:
-            if sk in var and var[sk] and str(var[sk]).strip():
-                vsku = str(var[sk]).strip()
-                parts.append(vsku)
-                # Also add without dashes for fuzzy match
-                parts.append(vsku.replace("-","").replace("_",""))
-        
-        # Extract DN/inner diameter values
-        for dk in DN_KEYS:
-            if dk in var and var[dk] and str(var[dk]).strip():
-                vdn = str(var[dk]).strip()
-                try:
-                    dn_int = int(float(vdn))
-                    parts.append(f"DN{dn_int} {dn_int}мм {dn_int}mm")
-                except ValueError:
-                    pass
-                break
-        
-        # Add all numeric values for technical matching
-        for vk, vv in var.items():
-            if vk == "_sku" or vk in SKU_KEYS: continue
-            if vv and re.search(r'\d', str(vv)):
-                parts.append(str(vv))
-
-    if description: parts.append(description[:800])
-
-    # Add key numeric patterns from full page text
-    if full_text:
-        # Extract all bar values
-        for b in _BAR_RE.findall(full_text):
-            parts.append(f"{b} bar бар")
-        # DN = внутрішній діаметр — додаємо всі варіанти написання
-        for d in _DN_RE.findall(full_text):
-            parts.append(f"DN{d} DN {d} {d}мм {d}mm внутрішній діаметр {d}")
-        # Temperature
-        m = _TEMP_RE.search(full_text)
-        if m:
-            parts.append(f"{m.group(1)}°C {m.group(2)}°C температура")
-
-    # Add all variant SKUs also as plain space-separated tokens at the end
-    # This ensures ILIKE '%TI-A101-08-08%' always finds them
-    sku_tokens = []
-    SKU_KEYS_B = ["_sku","Індекс","Indeks","Index","SKU","Артикул"]
-    for var in (variants or []):
-        for sk in SKU_KEYS_B:
-            if sk in var and var[sk] and str(var[sk]).strip():
-                v = str(var[sk]).strip()
-                if len(v) >= 4:
-                    sku_tokens.append(v)
-                    sku_tokens.append(v.replace("-","").replace("_","").replace("/",""))
-
-    joined = " | ".join(filter(None, parts))
-    if sku_tokens:
-        joined += " " + " ".join(sku_tokens)
-    return joined[:10000]
+    except json.JSONDecodeError as e:
+        logger.debug(f"Haiku JSON parse error: {e}")
+        return None
+    except Exception as e:
+        logger.debug(f"Haiku extract error: {e}")
+        return None
 
 
-# ── OpenAI embedding ──────────────────────────────────────────────────────────
+# ── Embedding ─────────────────────────────────────────────────────────────────
 async def _get_embedding(text: str) -> Optional[List[float]]:
     key = os.getenv("OPENAI_API_KEY", "")
     if not key or not text:
@@ -183,7 +134,7 @@ async def _get_embedding(text: str) -> Optional[List[float]]:
             r = await c.post(
                 "https://api.openai.com/v1/embeddings",
                 headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json={"model": "text-embedding-3-small", "input": text[:8000]}
+                json={"model": "text-embedding-3-small", "input": text[:8000]},
             )
             if r.status_code == 200:
                 return r.json()["data"][0]["embedding"]
@@ -192,7 +143,7 @@ async def _get_embedding(text: str) -> Optional[List[float]]:
     return None
 
 
-# ── PDF page helpers ──────────────────────────────────────────────────────────
+# ── PyMuPDF helpers ───────────────────────────────────────────────────────────
 def _get_spans(page) -> List[Dict]:
     spans = []
     for block in page.get_text("dict")["blocks"]:
@@ -203,136 +154,345 @@ def _get_spans(page) -> List[Dict]:
                 t = span["text"].strip()
                 if t:
                     spans.append({
-                        "text": t, "size": span["size"],
+                        "text": t,
+                        "size": round(span["size"], 1),
                         "bold": "Bold" in span.get("font", ""),
-                        "bbox": span["bbox"], "color": span["color"],
+                        "bbox": span["bbox"],
+                        "color": span["color"],
                     })
     return spans
 
 
-def _find_product_image(page) -> Optional[Dict]:
-    best, best_area = None, 0
-    for img in page.get_images(full=True):
-        try:
-            bbox = page.get_image_bbox(img)
-            w, h = bbox.x1 - bbox.x0, bbox.y1 - bbox.y0
-            if w < 80 or h < 60 or w > 350 or bbox.x0 > 310:
-                continue
-            area = w * h
-            if area > best_area:
-                best_area = area
-                best = {"page": page.number + 1,
-                        "x0": round(bbox.x0, 1), "y0": round(bbox.y0, 1),
-                        "x1": round(bbox.x1, 1), "y1": round(bbox.y1, 1)}
-        except Exception:
-            continue
-    return best
-
-
-SKIP_TITLES = {"www.", "tubes-international", "Шланги для промисловості",
-               "Силова гідравліка", "Промислова арматура", "ПРОМИСЛОВА АРМАТУРА",
-               "Пневматика", "ПНЕВМАТИКА", "TI-Katalog"}
-
-
-def _find_model_name(spans: List[Dict]) -> Optional[str]:
-    candidates = []
-    for s in spans:
-        t = s["text"].strip()
-        if len(t) < 2 or len(t) > 100:
-            continue
-        if any(sk in t for sk in SKIP_TITLES):
-            continue
-        upper_ratio = sum(1 for c in t if c.isupper()) / max(len(t), 1)
-        score = 0
-        if s["size"] >= 12:  score += 3
-        if s["bold"]:         score += 2
-        if upper_ratio > 0.3: score += 2
-        if re.search(r'[A-Z]{3}', t): score += 1
-        if score >= 4:
-            candidates.append((score, s["bbox"][1], t))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda x: (-x[0], x[1]))
-    return candidates[0][2]
-
-
-def _find_subtitle(spans: List[Dict], model: str) -> Optional[str]:
-    found = False
-    for s in spans:
-        t = s["text"].strip()
-        if model and model.upper() in t.upper():
-            found = True
-            continue
-        if found and len(t) > 10:
-            if s["color"] != 0 or s["bold"]:
-                return t[:300]
-            if not any(lbl in t for lbl in SPEC_LABELS):
-                return t[:300]
-    return None
-
-
-def _extract_specs(spans: List[Dict]) -> Dict[str, str]:
-    specs = {}
-    full_text = "\n".join(s["text"] for s in spans)
-    for label in SPEC_LABELS:
-        m = re.search(
-            rf'{re.escape(label)}\s*[:\s]\s*(.{{3,120}}?)(?=\n|$)',
-            full_text, re.IGNORECASE | re.MULTILINE
-        )
-        if m:
-            val = m.group(1).strip().rstrip(".,")
-            if val:
-                specs[label.split()[0]] = val[:200]
-    return specs
-
-
-def _extract_description(spans: List[Dict]) -> str:
-    lines, seen = [], set()
-    for s in spans:
-        t = s["text"].strip()
-        if len(t) < 20: continue
-        if any(sk in t for sk in ["www.", "tubes-international"]): continue
-        digit_ratio = sum(1 for c in t if c.isdigit()) / len(t)
-        if digit_ratio > 0.4: continue
-        if 7 <= s["size"] <= 12:
-            key = t[:40]
-            if key not in seen:
-                seen.add(key); lines.append(t)
-    return " ".join(lines)[:4000]
-
-
-def _extract_certifications(spans: List[Dict]) -> Optional[str]:
-    full = " ".join(s["text"] for s in spans)
-    matches = CERT_PATTERN.findall(full)
-    if not matches: return None
-    return max(matches, key=len)[:600]
-
-
-def _extract_variants(page) -> List[Dict]:
+def _extract_tables_text(page) -> Tuple[List[Dict], str]:
+    """Extract table data as both structured variants and plain text."""
     variants = []
+    table_lines = []
+
     try:
         import pandas as pd
         tabs = page.find_tables()
         for tab in tabs.tables:
             df = tab.to_pandas()
-            if df is None or df.empty: continue
+            if df is None or df.empty:
+                continue
+
+            # Table as plain text for Claude
+            table_lines.append(df.to_string(index=False, max_rows=30))
+
+            # Check if this looks like a product variants table
             first_col = df.iloc[:, 0].astype(str)
-            if not first_col.str.match(r'[A-Z]{2,}[-_]').any(): continue
-            headers = [str(c).strip() for c in df.columns]
-            for _, row in df.iterrows():
-                variant = {}
-                for col, val in zip(headers, row):
-                    v = str(val).strip()
-                    if v and v not in ("nan", "None", ""):
-                        variant[str(col).strip()[:50]] = v[:80]
-                if variant:
-                    vals = list(variant.values())
-                    if vals and re.match(r'[A-Z]{2,}[-_]', vals[0]):
-                        variant["_sku"] = vals[0]
-                    variants.append(variant)
+            has_sku_col = first_col.str.match(r'[A-Z]{2,}[-_]', na=False).any()
+
+            if not has_sku_col:
+                # Maybe column header contains SKU info
+                for col in df.columns:
+                    if re.match(r'[A-Z]{2,}[-_]', str(col)):
+                        has_sku_col = True
+                        break
+
+            if has_sku_col or len(df) > 2:
+                headers = [str(c).strip()[:50] for c in df.columns]
+                for _, row in df.iterrows():
+                    variant = {}
+                    for col, val in zip(headers, row):
+                        v = str(val).strip()
+                        if v and v not in ("nan", "None", "", "-"):
+                            variant[col] = v[:100]
+                    if len(variant) >= 2:
+                        # Try to find SKU in row
+                        for k, v in variant.items():
+                            if re.match(r'[A-Z]{2,}[-_][A-Z0-9]', v):
+                                variant["_sku"] = v
+                                break
+                        variants.append(variant)
+
     except Exception as e:
         logger.debug(f"Table extract: {e}")
-    return variants[:200]
+
+    table_text = "\n---\n".join(table_lines)[:2000]
+    return variants[:200], table_text
+
+
+def _find_image(page) -> Optional[Dict]:
+    """Find best product image bbox on page."""
+    best, best_area = None, 0
+    for img in page.get_images(full=True):
+        try:
+            bbox = page.get_image_bbox(img)
+            w = bbox.x1 - bbox.x0
+            h = bbox.y1 - bbox.y0
+            if w < 60 or h < 50 or w > 400:
+                continue
+            area = w * h
+            if area > best_area:
+                best_area = area
+                best = {
+                    "page": page.number + 1,
+                    "x0": round(bbox.x0, 1), "y0": round(bbox.y0, 1),
+                    "x1": round(bbox.x1, 1), "y1": round(bbox.y1, 1),
+                }
+        except Exception:
+            continue
+    return best
+
+
+def _extract_certifications(text: str) -> Optional[str]:
+    matches = _CERT_PAT.findall(text)
+    if not matches:
+        return None
+    return "; ".join(sorted(set(m.strip()[:100] for m in matches)))[:600]
+
+
+def _extract_all_skus(text: str, variants: List[Dict]) -> List[str]:
+    """Collect every SKU mention from page text and variant tables."""
+    skus = set()
+    for m in _SKU_PAT.finditer(text.upper()):
+        skus.add(m.group(1))
+    sku_keys = ["_sku", "Індекс", "Indeks", "Index", "SKU", "Артикул"]
+    for var in variants:
+        for k in sku_keys:
+            if k in var and var[k]:
+                v = str(var[k]).strip().upper()
+                if re.match(r'[A-Z]{2,}[-_]', v):
+                    skus.add(v)
+    return list(skus)
+
+
+# ── Regex fallback (when Haiku unavailable) ───────────────────────────────────
+def _regex_extract(spans: List[Dict], full_text: str) -> dict:
+    """Pure regex extraction — fast but less accurate than Haiku."""
+
+    # Find title: largest/boldest text, not a category name
+    SKIP = {"www.", "tubes-international", "TI-Katalog", "Tel:", "KATALOG"}
+    candidates = []
+    for s in spans:
+        t = s["text"].strip()
+        if len(t) < 3 or len(t) > 120 or any(sk in t for sk in SKIP):
+            continue
+        score = 0
+        if s["size"] >= 12:
+            score += int(s["size"])
+        if s["bold"]:
+            score += 5
+        if re.search(r'[A-Z]{3}', t):
+            score += 3
+        if score >= 10:
+            candidates.append((score, s["bbox"][1], t))
+
+    title = None
+    if candidates:
+        candidates.sort(key=lambda x: (-x[0], x[1]))
+        title = candidates[0][2]
+
+    # Subtitle: text right after title
+    subtitle = None
+    if title:
+        found = False
+        for s in spans:
+            t = s["text"].strip()
+            if title.upper() in t.upper():
+                found = True
+                continue
+            if found and len(t) > 15 and not any(sk in t for sk in SKIP):
+                subtitle = t[:200]
+                break
+
+    # Technical params
+    dn_mm = None
+    m = _DN_RE.search(full_text)
+    if m:
+        dn_mm = int(m.group(1))
+
+    bar_max = None
+    bars = [float(b.replace(",", ".")) for b in _BAR_RE.findall(full_text) if float(b.replace(",", ".")) < 1000]
+    if bars:
+        bar_max = max(bars)
+
+    temp_min, temp_max = None, None
+    m = _TEMP_RE.search(full_text)
+    if m:
+        temp_min = int(m.group(1))
+        temp_max = int(m.group(2))
+
+    # Inner x outer diameter
+    m = _DIAM_RE.search(full_text)
+    if m and not dn_mm:
+        dn_mm = float(m.group(1).replace(",", "."))
+
+    # Material detection
+    MATERIALS = {
+        "силікон": "силіконовий", "silicone": "силіконовий",
+        "ПВХ": "ПВХ", "PVC": "ПВХ",
+        "поліуретан": "поліуретановий", "polyurethane": "поліуретановий",
+        "тефлон": "тефлоновий (PTFE)", "PTFE": "тефлоновий (PTFE)",
+        "гума": "гумовий", "rubber": "гумовий",
+        "нержавіюч": "нержавіюча сталь", "stainless": "нержавіюча сталь",
+        "латунь": "латунь", "brass": "латунь",
+        "сталь": "сталь", "steel": "сталь",
+        "поліамід": "поліамід", "nylon": "поліамід",
+    }
+    material = None
+    ft_lower = full_text.lower()
+    for kw, mat in MATERIALS.items():
+        if kw.lower() in ft_lower:
+            material = mat
+            break
+
+    # Description: medium-sized text, not too many digits
+    desc_lines, seen = [], set()
+    for s in spans:
+        t = s["text"].strip()
+        if len(t) < 25 or any(sk in t for sk in SKIP):
+            continue
+        digit_ratio = sum(1 for c in t if c.isdigit()) / len(t)
+        if digit_ratio > 0.35:
+            continue
+        if 7 <= s["size"] <= 13:
+            key = t[:40]
+            if key not in seen:
+                seen.add(key)
+                desc_lines.append(t)
+    description = " ".join(desc_lines)[:2000]
+
+    return {
+        "title": title,
+        "subtitle": subtitle,
+        "material": material,
+        "dn_mm": dn_mm,
+        "bar_max": bar_max,
+        "temp_min": temp_min,
+        "temp_max": temp_max,
+        "application": None,
+        "certifications": None,
+        "sku": None,
+        "description": description,
+    }
+
+
+# ── Normalize and build attrs ─────────────────────────────────────────────────
+def _build_attrs(extracted: dict, full_text: str) -> dict:
+    """Build normalized attributes dict from extracted data."""
+    attrs = {}
+
+    if extracted.get("material"):
+        attrs["Матеріал"] = str(extracted["material"])[:100]
+
+    if extracted.get("dn_mm") is not None:
+        dn = extracted["dn_mm"]
+        attrs["DN"] = str(int(float(dn))) if float(dn) == int(float(dn)) else str(dn)
+        attrs["d_вн_мм"] = attrs["DN"]
+
+    if extracted.get("bar_max") is not None:
+        attrs["Тиск_бар"] = str(extracted["bar_max"])
+
+    if extracted.get("temp_min") is not None:
+        attrs["Темп_мін"] = str(extracted["temp_min"])
+
+    if extracted.get("temp_max") is not None:
+        attrs["Темп_макс"] = str(extracted["temp_max"])
+
+    if extracted.get("application"):
+        attrs["Застосування"] = str(extracted["application"])[:100]
+
+    if extracted.get("certifications"):
+        cert_str = extracted["certifications"]
+        if isinstance(cert_str, list):
+            cert_str = "; ".join(cert_str)
+        attrs["Сертифікати"] = str(cert_str)[:200]
+
+    # Also extract from raw text as backup
+    if "DN" not in attrs:
+        m = _DN_RE.search(full_text)
+        if m:
+            attrs["DN"] = m.group(1)
+            attrs["d_вн_мм"] = m.group(1)
+
+    if "Тиск_бар" not in attrs:
+        bars = [float(b.replace(",", ".")) for b in _BAR_RE.findall(full_text)
+                if float(b.replace(",", ".")) < 1000]
+        if bars:
+            attrs["Тиск_бар"] = str(max(bars))
+
+    if "Темп_мін" not in attrs or "Темп_макс" not in attrs:
+        m = _TEMP_RE.search(full_text)
+        if m:
+            attrs.setdefault("Темп_мін", m.group(1))
+            attrs.setdefault("Темп_макс", m.group(2))
+
+    return attrs
+
+
+def _build_search_text(
+    title: str, subtitle: str, sku: str,
+    attrs: dict, variants: List[Dict],
+    description: str, all_skus: List[str],
+    full_text: str = ""
+) -> str:
+    """Rich searchable text with all identifiers and technical values."""
+    parts = [title or ""]
+    if subtitle:
+        parts.append(subtitle)
+    if sku:
+        parts.append(sku)
+        parts.append(sku.replace("-", "").replace("_", ""))
+
+    # Attributes
+    for k, v in attrs.items():
+        parts.append(f"{k} {v}")
+
+    # DN searchable variants
+    if attrs.get("DN"):
+        d = attrs["DN"]
+        parts.append(f"DN{d} DN {d} {d}мм {d}mm діаметр {d}")
+
+    # Bar searchable variants
+    if attrs.get("Тиск_бар"):
+        b = attrs["Тиск_бар"]
+        try:
+            bi = str(int(float(b)))
+            parts.append(f"{bi} bar {bi} бар {b} bar")
+        except ValueError:
+            pass
+
+    # Temp
+    if attrs.get("Темп_мін") and attrs.get("Темп_макс"):
+        parts.append(f"{attrs['Темп_мін']}°C {attrs['Темп_макс']}°C температура")
+
+    # ALL variant SKUs — plain text for ILIKE search
+    sku_tokens = set()
+    sku_keys = ["_sku", "Індекс", "Indeks", "Index", "SKU", "Артикул"]
+    for var in variants:
+        for k in sku_keys:
+            if k in var and var[k]:
+                v = str(var[k]).strip()
+                if len(v) >= 4:
+                    sku_tokens.add(v)
+                    sku_tokens.add(v.replace("-", "").replace("_", "").replace("/", ""))
+                    # Add individual parts for partial search
+                    parts_of = v.split("-")
+                    if len(parts_of) >= 3:
+                        sku_tokens.add("-".join(parts_of[:2]))  # prefix
+
+    # All SKUs from text
+    for s in all_skus:
+        sku_tokens.add(s)
+        sku_tokens.add(s.replace("-", "").replace("_", ""))
+
+    # Description
+    if description:
+        parts.append(description[:1000])
+
+    # Certifications
+    if attrs.get("Сертифікати"):
+        parts.append(attrs["Сертифікати"])
+
+    # Build final text
+    joined = " | ".join(filter(None, parts))
+    # Append all SKU tokens as plain space-separated text
+    if sku_tokens:
+        joined += " " + " ".join(sorted(sku_tokens))
+
+    return joined[:12000]
 
 
 # ── Main extraction ───────────────────────────────────────────────────────────
@@ -347,57 +507,85 @@ async def extract_products(
 
     from core.database import AsyncSessionLocal
     from models.models import Product, Section
+    from sqlalchemy import text as sa_text
+
+    use_haiku = bool(os.getenv("ANTHROPIC_API_KEY"))
+    haiku_cost_estimate = 0  # in USD cents
 
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     page_count = len(doc)
     saved = []
-    all_page_text = []
+    all_page_texts = []
 
     for page_idx in range(page_count):
         page = doc[page_idx]
         pnum = page_idx + 1
+        full_text = page.get_text("text").strip()
+
+        if not full_text or len(full_text) < 30:
+            continue
+
+        all_page_texts.append(full_text)
         spans = _get_spans(page)
-        page_raw = page.get_text("text").strip()
-        if page_raw:
-            all_page_text.append(page_raw)
+        variants, table_text = _extract_tables_text(page)
+        image_bbox = _find_image(page)
+        all_skus = _extract_all_skus(full_text, variants)
+        certs = _extract_certifications(full_text)
 
-        if not spans:
+        # ── Extract with Claude Haiku (primary) or regex (fallback) ──
+        extracted = None
+        if use_haiku:
+            extracted = await _haiku_extract(full_text, table_text)
+            if extracted:
+                haiku_cost_estimate += 1  # ~$0.01 per 100 pages
+
+        if not extracted:
+            extracted = _regex_extract(spans, full_text)
+
+        # Skip pages without a recognizable product title
+        title = extracted.get("title") or ""
+        if not title or len(title) < 2:
             continue
 
-        model_name = _find_model_name(spans)
-        if not model_name:
-            continue
+        # Override certifications with regex if Haiku missed them
+        if not extracted.get("certifications") and certs:
+            extracted["certifications"] = certs
 
-        image_bbox    = _find_product_image(page)
-        subtitle      = _find_subtitle(spans, model_name)
-        raw_specs     = _extract_specs(spans)
-        description   = _extract_description(spans)
-        certifications = _extract_certifications(spans)
-        variants      = _extract_variants(page)
+        # Build normalized attributes
+        attrs = _build_attrs(extracted, full_text)
 
-        # Normalize with full page text for bar/DN/temp
-        attrs = _normalize_attrs(raw_specs, page_raw)
+        # SKU: from Haiku, then variants, then text scan
+        sku = extracted.get("sku")
+        if not sku and variants:
+            for var in variants:
+                for k in ["_sku", "Індекс", "Indeks", "SKU"]:
+                    if k in var and var[k]:
+                        sku = var[k]
+                        break
+                if sku:
+                    break
+        if not sku and all_skus:
+            sku = all_skus[0]
 
-        # SKU
-        sku = None
-        if variants:
-            sku = variants[0].get("_sku") or variants[0].get("Індекс")
-        if not sku:
-            m = SKU_PATTERN.search(" ".join(s["text"] for s in spans))
-            sku = m.group(1) if m else None
+        subtitle = extracted.get("subtitle") or ""
+        description = extracted.get("description") or ""
 
+        # Build rich search_text
         search_text = _build_search_text(
-            model_name, subtitle, sku, attrs, variants, description, page_raw
+            title, subtitle, sku or "",
+            attrs, variants, description,
+            all_skus, full_text,
         )
 
-        embedding = await _get_embedding(search_text[:2000])
+        # Get embedding
+        embedding = await _get_embedding(search_text[:3000])
 
         prod_data = dict(
-            title=model_name[:512],
-            subtitle=(subtitle or "")[:512],
+            title=title[:512],
+            subtitle=subtitle[:512],
             sku=(sku or "")[:128],
-            description=description,
-            certifications=certifications,
+            description=description[:4000],
+            certifications=extracted.get("certifications", "") or "",
             attributes=attrs,
             variants=variants,
             search_text=search_text,
@@ -415,19 +603,15 @@ async def extract_products(
                 await db.commit()
                 await db.refresh(prod)
 
+                # Save embedding
                 if embedding:
-                    try:
-                        await db.execute(
-                            __import__('sqlalchemy').text(
-                                "UPDATE products SET embedding = :emb WHERE id = :id"
-                            ),
-                            {"emb": str(embedding), "id": prod.id}
-                        )
-                        await db.commit()
-                    except Exception:
-                        pass
+                    await db.execute(
+                        sa_text("UPDATE products SET embedding = :emb WHERE id = :id"),
+                        {"emb": str(embedding), "id": prod.id}
+                    )
+                    await db.commit()
 
-                # Build search index for all variant SKUs
+                # Build ProductIndex for all SKUs
                 try:
                     from services.indexer import index_product
                     await index_product(prod, db)
@@ -436,30 +620,35 @@ async def extract_products(
                     logger.debug(f"Index product#{prod.id}: {ie}")
 
                 saved.append(prod)
+                method = "🤖 Haiku" if extracted and use_haiku else "📐 regex"
                 logger.info(
-                    f"Doc#{document_id} p{pnum}: '{model_name}' "
-                    f"attrs={list(attrs.keys())[:4]} "
-                    f"variants={len(variants)} "
-                    f"img={'✓' if image_bbox else '✗'} "
+                    f"Doc#{document_id} p{pnum} [{method}]: '{title[:40]}' "
+                    f"DN={attrs.get('DN','?')} bar={attrs.get('Тиск_бар','?')} "
+                    f"variants={len(variants)} skus={len(all_skus)} "
                     f"emb={'✓' if embedding else '✗'}"
                 )
+
         except Exception as e:
             logger.error(f"Save product p{pnum}: {e}")
 
     doc.close()
 
     # Update section full_text
-    if all_page_text and section_id:
-        full = "\n\n".join(all_page_text)[:50000]
+    if all_page_texts and section_id:
+        full = "\n\n".join(all_page_texts)[:50000]
         try:
             async with AsyncSessionLocal() as db:
                 sec = await db.get(Section, section_id)
-                if sec and not sec.full_text:
-                    sec.full_text = full
+                if sec:
+                    if not sec.full_text:
+                        sec.full_text = full
                     if not sec.description:
-                        sec.description = "\n".join(all_page_text[:2])[:1000]
+                        sec.description = all_page_texts[0][:500]
                     await db.commit()
         except Exception as e:
             logger.debug(f"Section full_text: {e}")
+
+    if haiku_cost_estimate > 0:
+        logger.info(f"Doc#{document_id}: ~{haiku_cost_estimate} Haiku calls (~${haiku_cost_estimate/10000:.4f})")
 
     return saved, page_count
