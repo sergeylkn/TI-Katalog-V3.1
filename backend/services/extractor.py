@@ -1,59 +1,54 @@
 import logging
 import json
-import re
 from typing import List, Dict, Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from models.models import Product, Document, Section
+from models.models import Product, Document
 
 logger = logging.getLogger("extractor")
 
 def safe_list_to_str(value: Any, separator: str = "; ") -> str:
-    """Безопасно преобразует список или любое значение в строку для БД."""
+    """Безпечно перетворює список або будь-яке значення в рядок для БД."""
     if value is None:
         return ""
     if isinstance(value, list):
         return separator.join([str(i).strip() for i in value if i is not None])
     return str(value).strip()
 
-async def save_extracted_products(
+async def extract_products(
     db: AsyncSession, 
     doc: Document, 
     products_data: Any, 
     page_num: int
 ) -> int:
     """
-    Сохраняет извлеченные товары в базу данных.
-    Исправляет ошибки типов данных и структуры JSON.
+    Зберігає витягнуті товари в базу даних.
+    Назва функції змінена на extract_products для сумісності з importer.py.
     """
     added_count = 0
     
-    # 1. Защита от 'list' object has no attribute 'get'
-    # Если пришел список вместо словаря с ключом "products"
+    # Захист від невірного формату (якщо Claude надіслав список замість словника)
     items = []
     if isinstance(products_data, dict):
         items = products_data.get("products", [])
     elif isinstance(products_data, list):
         items = products_data
     else:
-        logger.error(f"Doc#{doc.id} p{page_num}: Неверный формат данных от ИИ")
+        logger.error(f"Doc#{doc.id} p{page_num}: Невірний формат даних від Claude")
         return 0
 
     for p_data in items:
         try:
-            # Пропускаем, если элемент не является словарем
             if not isinstance(p_data, dict):
                 continue
 
-            # 2. Очистка и нормализация данных
             title = p_data.get("title") or p_data.get("name") or "Без назви"
             sku = p_data.get("sku") or p_data.get("article") or ""
             description = p_data.get("description", "")
             
-            # Исправление DataError: преобразуем список сертификатов в строку
+            # Виправлення DataError: перетворюємо список сертифікатів у рядок
             certifications = safe_list_to_str(p_data.get("certifications", ""))
             
-            # Обработка атрибутов и вариантов (должны быть dict/list для JSON поля)
+            # Обробка атрибутів
             attributes = p_data.get("attributes", {})
             if not isinstance(attributes, dict):
                 attributes = {"raw_data": str(attributes)}
@@ -62,7 +57,7 @@ async def save_extracted_products(
             if not isinstance(variants, list):
                 variants = [variants]
 
-            # 3. Создание поискового текста для Full-Text Search
+            # Формування тексту для пошуку
             attr_str = " ".join([f"{k} {v}" for k, v in attributes.items() if isinstance(v, (str, int, float))])
             search_text = f"{title} {sku} {description} {attr_str} {certifications}".lower()
 
@@ -84,14 +79,14 @@ async def save_extracted_products(
             added_count += 1
             
         except Exception as e:
-            logger.error(f"Doc#{doc.id} p{page_num}: Ошибка сохранения товара: {e}")
+            logger.error(f"Doc#{doc.id} p{page_num}: Помилка обробки товару: {e}")
             continue
 
     try:
         await db.commit()
     except Exception as e:
         await db.rollback()
-        logger.error(f"Doc#{doc.id}: Ошибка коммита в базу: {e}")
+        logger.error(f"Doc#{doc.id}: Помилка транзакції: {e}")
         return 0
         
     return added_count
