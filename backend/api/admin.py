@@ -5,8 +5,8 @@ import os
 import logging
 
 # Імпорти з вашого проекту
-# Якщо виникає ModuleNotFoundError, переконайтеся, що в папках database та models є файл __init__.py
-from database.db import get_db
+# Використовуємо відносні/пакетні імпорти
+from core.database import get_db
 from models.models import Product, Document, ParseLog, ImportLog
 from services.importer import run_import_all
 

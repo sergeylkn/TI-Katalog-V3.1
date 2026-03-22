@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 # Тепер ці імпорти мають працювати коректно
-from database.db import init_db
+from core.database import init_db
 from api import admin, documents, products, search, chat
 
 # Налаштування логування

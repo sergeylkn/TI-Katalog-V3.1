@@ -11,3 +11,19 @@ AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_co
 async def get_db():
     async with AsyncSessionLocal() as session:
         yield session
+
+
+async def init_db():
+    """Initialize database schema (create tables).
+
+    This will run SQLAlchemy's Base.metadata.create_all using an async
+    engine via run_sync. It's safe to call multiple times.
+    """
+    try:
+        # Import here to avoid circular import at module load
+        from models.models import Base
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    except Exception:
+        # Let caller handle/log the exception
+        raise
