@@ -327,9 +327,20 @@ async def _get_or_create_section(db, slug: str, cat_id: int) -> Section:
     return sec
 
 
-async def run_import_all():
+async def run_import_all(db=None):
+    """Background task to import all PDFs from R2 manifest.
+
+    Args:
+        db: Optional AsyncSession (created internally if not provided).
+    """
     logger.info("🔄 R2 import v5 starting…")
-    async with AsyncSessionLocal() as db:
+
+    # Use provided db session or create new one
+    should_close_db = db is None
+    if db is None:
+        db = AsyncSessionLocal()
+
+    try:
         try:
             async with httpx.AsyncClient(timeout=30) as c:
                 resp = await c.get(MANIFEST)
@@ -369,15 +380,18 @@ async def run_import_all():
         logger.info(f"✅ Queued {len(new_ids)} documents")
         _live(f"✅ Черга: {len(new_ids)} документів додано до обробки", "info")
 
-    total_docs = len(new_ids)
-    for idx, doc_id in enumerate(new_ids):
-        try:
-            await parse_one(doc_id)
-        except Exception as e:
-            logger.error(f"parse_one({doc_id}): {e}")
-        _live_progress(idx + 1, total_docs)
-        await asyncio.sleep(0.3)
-    _live(f"🏁 Імпорт завершено: {total_docs} документів оброблено", "done")
+        total_docs = len(new_ids)
+        for idx, doc_id in enumerate(new_ids):
+            try:
+                await parse_one(doc_id)
+            except Exception as e:
+                logger.error(f"parse_one({doc_id}): {e}")
+            _live_progress(idx + 1, total_docs)
+            await asyncio.sleep(0.3)
+        _live(f"🏁 Імпорт завершено: {total_docs} документів оброблено", "done")
+    finally:
+        if should_close_db:
+            await db.close()
 
 
 async def parse_one(doc_id: int):
