@@ -5,8 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer
-from fastapi.security.http import HTTPAuthCredentials
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt
 from passlib.context import CryptContext
 
@@ -33,10 +32,10 @@ def create_access_token(admin_id: str = "admin", expires_delta: Optional[timedel
     """Создаем JWT токен."""
     if expires_delta is None:
         expires_delta = timedelta(hours=TOKEN_EXPIRY_HOURS)
-    
+
     expire = datetime.now(timezone.utc) + expires_delta
     to_encode = {"sub": admin_id, "exp": expire}
-    
+
     try:
         encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
         return encoded_jwt
@@ -66,7 +65,7 @@ def verify_token(token: str) -> str:
             detail="Invalid authentication credentials",
         )
 
-async def get_current_admin(credentials: HTTPAuthCredentials = Depends(security)) -> str:
+async def get_current_admin(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
     """Dependency для защиты роутов."""
     return verify_token(credentials.credentials)
 
