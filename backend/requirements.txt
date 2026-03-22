@@ -10,7 +10,7 @@ python-multipart==0.0.12
 python-dotenv==1.0.1
 pgvector==0.3.2
 pandas==2.2.3
-anthropic==0.7.11
+anthropic==0.86.0
 redis==5.0.1
 psutil==5.9.6
 cryptography==41.0.7
