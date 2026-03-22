@@ -22,7 +22,7 @@ from core.database import get_db
 from models.models import Product, Section, Category
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+router = APIRouter(prefix="/api/chat", tags=["chat"])
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SYSTEM PROMPT — Claude як інженер-консультант

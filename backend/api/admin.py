@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text, select, func
 import os
@@ -9,6 +10,7 @@ import logging
 from core.database import get_db
 from models.models import Product, Document, ParseLog, ImportLog
 from services.importer import run_import_all
+from services.live_log import bus
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 logger = logging.getLogger("admin_api")
@@ -92,8 +94,24 @@ async def import_all_pdfs(background_tasks: BackgroundTasks, db: AsyncSession = 
     return {"status": "started", "message": "Background import process initiated"}
 
 @router.get("/live-log")
-async def get_live_log(db: AsyncSession = Depends(get_db)):
-    """Останні події парсингу."""
+async def get_live_log_sse():
+    """Live event stream (SSE) для логів парсингу."""
+    async def event_generator():
+        async for event in bus.stream():
+            yield event
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
+@router.get("/parse-logs")
+async def get_parse_logs(db: AsyncSession = Depends(get_db)):
+    """Останні події парсингу (JSON)."""
     try:
         stmt = select(ParseLog).order_by(ParseLog.created_at.desc()).limit(50)
         result = await db.execute(stmt)

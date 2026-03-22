@@ -14,7 +14,7 @@ from core.database import get_db
 from models.models import Product, Document, Category, Section, ProductIndex
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+router = APIRouter(prefix="/api/search", tags=["search"])
 
 # ── Polish → Ukrainian/English ────────────────────────────────────────────────
 # ── Russian → Ukrainian/English keyword mapping ───────────────────────────────

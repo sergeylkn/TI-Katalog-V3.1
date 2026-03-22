@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.database import get_db
 from models.models import Product, Document, Section, Category
 
-router = APIRouter()
+router = APIRouter(prefix="/api/products", tags=["products"])
 logger = logging.getLogger(__name__)
 
 # Simple in-memory PDF cache (doc_id → bytes)

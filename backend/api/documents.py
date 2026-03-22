@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.database import get_db
 from models.models import Document, Section, Category, Product
 
-router = APIRouter()
+router = APIRouter(prefix="/api/documents", tags=["documents"])
 
 
 @router.get("/categories")
