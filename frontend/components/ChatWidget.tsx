@@ -87,9 +87,13 @@ export default function ChatWidget() {
     return userMsgs[userMsgs.length - 1]?.content || ''
   }
 
-  // Render markdown-like text
-  const renderContent = (text: string) => {
-    return text
+  // Escape raw HTML special chars to prevent XSS
+  const escapeHtml = (s: string) =>
+    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+
+  // Render markdown-like text for ASSISTANT messages only (content comes from our API)
+  const renderAssistantContent = (text: string) => {
+    return escapeHtml(text)
       .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
       .replace(/`([^`]+)`/g, '<code style="background:var(--bg2);padding:1px 5px;border-radius:3px;font-family:var(--font-mono);font-size:11px;">$1</code>')
       .replace(/\[([^\]]+)\]\(\/product\/(\d+)\)/g,
@@ -156,8 +160,11 @@ export default function ChatWidget() {
                 background: m.role === 'user' ? 'var(--accent)' : 'var(--bg2)',
                 color: m.role === 'user' ? 'white' : 'var(--text)',
                 padding: '10px 14px', borderRadius: m.role === 'user' ? '14px 14px 2px 14px' : '14px 14px 14px 2px',
-                fontSize: 13, lineHeight: 1.6,
-              }} dangerouslySetInnerHTML={{ __html: renderContent(m.content) }} />
+                fontSize: 13, lineHeight: 1.6, whiteSpace: m.role === 'user' ? 'pre-wrap' : undefined,
+              }} {...(m.role === 'assistant'
+                ? { dangerouslySetInnerHTML: { __html: renderAssistantContent(m.content) } }
+                : { children: m.content }
+              )} />
 
               {/* Detected params badge */}
               {m.role === 'assistant' && m.params && Object.keys(m.params).length > 0 && (

@@ -9,6 +9,7 @@ from sqlalchemy import (
     ForeignKey, JSON, Index, UniqueConstraint
 )
 from sqlalchemy.orm import relationship, DeclarativeBase
+from pgvector.sqlalchemy import Vector
 
 
 def _now():
@@ -77,6 +78,7 @@ class Product(Base):
     attributes      = Column(JSON, default=dict)
     variants        = Column(JSON, default=list)
     search_text     = Column(Text, nullable=True)
+    embedding       = Column(Vector(1536), nullable=True)
     image_bbox      = Column(JSON, nullable=True)
     page_number     = Column(Integer, nullable=True)
     created_at      = Column(DateTime(timezone=True), default=_now)

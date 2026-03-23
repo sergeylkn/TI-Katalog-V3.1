@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.security import HTTPBearer
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -218,10 +218,9 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         from services.monitoring import monitor
         health = await monitor.get_full_health(db)
 
-        # Determine HTTP status code
         http_status = 200 if health["status"] == "healthy" else 503
-        return health, http_status
+        return JSONResponse(content=health, status_code=http_status)
 
     except Exception as e:
         logger.error(f"Health check failed: {e}")
-        return {"status": "unhealthy", "error": str(e)}, 503
+        return JSONResponse(content={"status": "unhealthy", "error": str(e)}, status_code=503)

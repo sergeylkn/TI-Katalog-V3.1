@@ -12,9 +12,15 @@ from passlib.context import CryptContext
 logger = logging.getLogger("auth")
 
 # Конфигурация
-SECRET_KEY = os.getenv("JWT_SECRET", "your-secret-key-change-in-production")
+_DEFAULT_SECRET = "your-secret-key-change-in-production"
+SECRET_KEY = os.getenv("JWT_SECRET", _DEFAULT_SECRET)
 ALGORITHM = "HS256"
 TOKEN_EXPIRY_HOURS = 24
+
+if SECRET_KEY == _DEFAULT_SECRET:
+    logger.warning("⚠️  JWT_SECRET is not set — using insecure default. Set JWT_SECRET env var in production!")
+if not os.getenv("ADMIN_PASSWORD"):
+    logger.warning("⚠️  ADMIN_PASSWORD is not set — using default password 'admin'. Set ADMIN_PASSWORD env var in production!")
 
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
