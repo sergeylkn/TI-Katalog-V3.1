@@ -415,20 +415,19 @@ async def parse_one(doc_id: int):
                 resp = await c.get(doc.file_url)
                 resp.raise_for_status()
 
-            # TODO: Implement PDF extraction and product parsing via Claude/LLM
-            # For now, we mark the document as successfully downloaded
+            from services.extractor import extract_products_from_pdf, extract_products
+
+            products_list, page_count = await extract_products_from_pdf(
+                resp.content, doc_id, doc.section_id or 0, doc.category_id or 0
+            )
+
             products_count = 0
-            page_count = 1
+            if products_list:
+                async with AsyncSessionLocal() as db2:
+                    doc2 = await db2.get(Document, doc_id)
+                    if doc2:
+                        products_count = await extract_products(db2, doc2, products_list, page_count)
 
-            # try:
-            #     products, page_count = await extract_products(
-            #         db, doc, resp.content, 1
-            #     )
-            #     products_count = len(products) if isinstance(products, list) else products
-            # except Exception as e:
-            #     logger.warning(f"PDF extraction skipped for doc#{doc_id}: {e}")
-
-            # Update document as processed
             async with AsyncSessionLocal() as db2:
                 doc2 = await db2.get(Document, doc_id)
                 if doc2:
@@ -437,9 +436,9 @@ async def parse_one(doc_id: int):
                     doc2.parsed_at = datetime.now(timezone.utc)
                     await db2.commit()
 
-            await _log("info", f"✅ {products_count} товарів, {page_count} сторінок (обробка призупинена)")
-            logger.info(f"✅ doc#{doc_id} ({doc.name}): downloaded (product extraction pending)")
-            _live(f"✅ {doc.name} — завантажено, обробка...", "done", doc=doc.name)
+            await _log("info", f"✅ {products_count} товарів, {page_count} сторінок")
+            logger.info(f"✅ doc#{doc_id} ({doc.name}): {products_count} products, {page_count} pages")
+            _live(f"✅ {doc.name} — {products_count} товарів", "done", doc=doc.name)
 
         except Exception as e:
             logger.error(f"parse error doc#{doc_id}: {e}")
