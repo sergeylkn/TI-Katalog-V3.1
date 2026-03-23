@@ -7,7 +7,7 @@ from typing import Optional
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt
-from passlib.context import CryptContext
+import bcrypt as _bcrypt
 
 logger = logging.getLogger("auth")
 
@@ -22,17 +22,16 @@ if SECRET_KEY == _DEFAULT_SECRET:
 if not os.getenv("ADMIN_PASSWORD"):
     logger.warning("⚠️  ADMIN_PASSWORD is not set — using default password 'admin'. Set ADMIN_PASSWORD env var in production!")
 
-# Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Password hashing (direct bcrypt, no passlib)
 security = HTTPBearer()
 
 def hash_password(password: str) -> str:
     """Хешируем пароль."""
-    return pwd_context.hash(password)
+    return _bcrypt.hashpw(password.encode(), _bcrypt.gensalt()).decode()
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Проверяем пароль."""
-    return pwd_context.verify(plain_password, hashed_password)
+    return _bcrypt.checkpw(plain_password.encode(), hashed_password.encode())
 
 def create_access_token(admin_id: str = "admin", expires_delta: Optional[timedelta] = None) -> str:
     """Создаем JWT токен."""

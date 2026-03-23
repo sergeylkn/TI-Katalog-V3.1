@@ -16,5 +16,4 @@ psutil==5.9.6
 cryptography==41.0.7
 bcrypt==4.2.0
 PyJWT==2.12.1
-passlib==1.7.4
 python-jose==3.3.0
