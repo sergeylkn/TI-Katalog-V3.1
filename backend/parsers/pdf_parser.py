@@ -1,20 +1,20 @@
 """
-Rule-based PDF parser for Tubes International product catalogs.
-Handles 3 real table formats found in the catalog PDFs:
+Парсер PDF-каталогов Tubes International без использования LLM.
+Обрабатывает 3 формата таблиц, обнаруженных в реальных PDF-файлах:
 
-  FORMAT A — Cross-reference matrix (hidravlichni-adaptery style)
-    rows = thread-dimension combos, cols = adapter types, cells = SKU
-    e.g. TI-A101-02-02, TI-A116-04*, ...
+  ФОРМАТ A — Матрица перекрёстных ссылок (стиль hidravlichni-adaptery)
+    строки = комбинации резьбовых размеров, столбцы = типы адаптеров, ячейки = SKU
+    пример: TI-A101-02-02, TI-A116-04*, ...
 
-  FORMAT B — Multi-material product list (camlock style)
-    row 0 = category title, header row has "номенклатура (алюміній)" etc.
-    cells may contain multiple SKUs separated by \n
-    e.g. AC-A-050-A\nAC-A-050-AX
+  ФОРМАТ B — Список товаров с несколькими материалами (стиль camlock)
+    строка 0 = название категории, заголовок содержит "номенклатура (алюміній)" и т.д.
+    ячейки могут содержать несколько SKU, разделённых \n
+    пример: AC-A-050-A\nAC-A-050-AX
 
-  FORMAT C — Simple product list (pneumatic/hose style)
-    row 0 = product title, row 1 maybe series code, row 2 = col headers
-    col "індекс"/"index" = SKU, rest = attributes
-    e.g. MW-2001B01, CX-CP-03X06, PR-WTZ-08
+  ФОРМАТ C — Простой список товаров (пневматика/шланги)
+    строка 0 = название товара, строка 1 = код серии, строка 2 = заголовки столбцов
+    столбец "індекс"/"index" = SKU, остальные = атрибуты
+    пример: MW-2001B01, CX-CP-03X06, PR-WTZ-08
 """
 
 import re
@@ -27,71 +27,83 @@ logger = logging.getLogger("pdf_parser")
 
 
 # ---------------------------------------------------------------------------
-# SKU pattern — covers all article formats observed in the PDFs
+# Регулярное выражение для артикулов — охватывает все форматы из PDF
 # ---------------------------------------------------------------------------
 _SKU_RE = re.compile(
     r'^(?:'
     r'[A-Z]{1,5}(?:[\-\/\.][A-Z0-9]+){1,6}'           # TI-A101-02-02, AC-A-050-SS, MW-2001B01
-    r'|[A-Z]{1,4}[\-][A-Z]{1,4}[\-][A-Z0-9]{2,}'      # CX-CP-03X06, PR-WTZ-08 (letter-letter-mixed)
-    r'|[A-Z0-9]{2,}[\-][A-Z0-9][\-A-Z0-9\.\/]{2,}'    # generic with at least one dash
+    r'|[A-Z]{1,4}[\-][A-Z]{1,4}[\-][A-Z0-9]{2,}'      # CX-CP-03X06, PR-WTZ-08 (буква-буква-смесь)
+    r'|[A-Z0-9]{2,}[\-][A-Z0-9][\-A-Z0-9\.\/]{2,}'    # общий формат с хотя бы одним дефисом
     r')\*?$',
     re.IGNORECASE,
 )
 
+# Значения ячеек, которые нужно игнорировать
 _SKIP_VALUES = {'-', '–', '—', '', 'none', 'nan', '-\n-', '–\n–'}
 
 def _is_sku(val: str) -> bool:
     v = val.strip().rstrip('*')
-    # Must start with a letter — rules out CAS numbers (e.g. "64-17-5") and REACH IDs
+    # Должен начинаться с буквы — исключает номера CAS (например, "64-17-5") и REACH ID
     return 3 <= len(v) <= 45 and v[0].isalpha() and bool(_SKU_RE.match(v))
 
 def _clean_sku(val: str) -> str:
-    """Remove trailing * and whitespace."""
+    """Убирает завершающий * и пробелы."""
     return val.strip().rstrip('*').strip()
 
 
 # ---------------------------------------------------------------------------
-# Header / title detection helpers
+# Вспомогательные функции для определения заголовков и названий
 # ---------------------------------------------------------------------------
+
+# Ключевые слова для столбца с артикулом
 _INDEX_KW = {'індекс', 'indeks', 'index', 'артикул', 'article', 'sku',
              'код', 'code', 'ref', 'part', 'номенклатура'}
+# Столбцы, которые пропускаем (вес, цена)
 _SKIP_COL_KW = {'вага', 'weight', 'kg', 'кг', 'ціна', 'price'}
+# Ключевые слова размерных параметров
 _DIM_KW = {'dn', 'd', 'dd', 'dw', 'l', 'mm', 'мм', 'діаметр', 'diameter',
            'тиск', 'pressure', 'бар', 'bar', 'pn', 'різьба', 'thread',
            'розмір', 'size', 'довжина', 'length', 'товщина', 'wall',
            'радіус', 'radius', 'зовнішній', 'внутрішній', 'з\'єднання'}
+# Ключевые слова материалов
 _MATERIAL_KW = {'алюміній', 'aluminium', 'aluminum', 'латунь', 'brass',
                 'сталь', 'steel', 'aisi', 'поліпропілен', 'polypropylene',
                 'пластик', 'plastic', 'нержавіюч'}
+# Вариации слова "номенклатура"
 _NOMENKLATURA_KW = {'номенклатура', 'nomenclature', 'нрменклатура'}
 
 
 def _row_text(row: List[str]) -> str:
+    """Склеивает ячейки строки в одну строку нижнего регистра."""
     return ' '.join(row).lower()
 
 def _has_skus_in_row(row: List[str]) -> bool:
+    """Возвращает True, если в строке есть хотя бы один валидный артикул."""
     return any(_is_sku(c) for c in row if c.strip() not in _SKIP_VALUES)
 
 def _count_skus(row: List[str]) -> int:
+    """Считает количество валидных артикулов в строке."""
     return sum(1 for c in row if c.strip() not in _SKIP_VALUES and _is_sku(c))
 
 def _is_dimension_header_row(row: List[str]) -> bool:
+    """Проверяет, является ли строка заголовком размерных параметров."""
     txt = _row_text(row)
     return any(kw in txt for kw in _DIM_KW)
 
 def _is_index_header_row(row: List[str]) -> bool:
+    """Проверяет, содержит ли строка заголовок столбца с артикулами."""
     txt = _row_text(row)
     return any(kw in txt for kw in _INDEX_KW)
 
 
 # ---------------------------------------------------------------------------
-# Table format detection
+# Определение формата таблицы
 # ---------------------------------------------------------------------------
 
 def _detect_format(rows: List[List[str]]) -> str:
     """
-    Returns 'A' (cross-matrix), 'B' (multi-material), 'C' (simple list),
-    or 'SKIP' if the table has no useful product data.
+    Возвращает 'A' (матрица), 'B' (мультиматериал), 'C' (простой список),
+    или 'SKIP', если таблица не содержит полезных данных о товарах.
     """
     if not rows or len(rows) < 3:
         return 'SKIP'
@@ -99,22 +111,22 @@ def _detect_format(rows: List[List[str]]) -> str:
     flat = ' '.join(' '.join(r) for r in rows[:8]).lower()
     n_cols = max(len(r) for r in rows)
 
-    # Check for 'номенклатура' keyword → Format B or A
+    # Проверяем ключевое слово 'номенклатура' → Формат B или A
     nomen_count = flat.count('номенклатур')
     if nomen_count >= 2:
-        # Format A: cross-reference matrix — thread dimension rows
-        # Identified by: multiple SKU columns AND dimension-like row headers
+        # Формат A: матрица перекрёстных ссылок — строки с размерами резьбы
+        # Признак: несколько столбцов SKU И заголовки с размерными параметрами
         sku_rows = sum(1 for r in rows[4:12] if _count_skus(r) >= 2)
         if sku_rows >= 2 and n_cols >= 8:
             return 'A'
         return 'B'
 
-    # Format C: simple list with index column
+    # Формат C: простой список с столбцом-индексом
     for r in rows[:5]:
         if _is_index_header_row(r):
             return 'C'
 
-    # If rows contain SKUs → treat as C
+    # Если строки содержат артикулы → считаем Форматом C
     for r in rows[1:5]:
         if _has_skus_in_row(r):
             return 'C'
@@ -123,11 +135,11 @@ def _detect_format(rows: List[List[str]]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Utility: extract page-level title from text above the table
+# Утилита: извлечение заголовка страницы из текста над таблицей
 # ---------------------------------------------------------------------------
 
 def _get_page_title(page: Any) -> str:
-    """Extract the largest/first text block as section title."""
+    """Возвращает текст с наибольшим шрифтом на странице (обычно заголовок раздела)."""
     blocks = page.get_text('dict', flags=fitz.TEXT_PRESERVE_WHITESPACE)['blocks']
     candidates = []
     for b in blocks:
@@ -141,39 +153,39 @@ def _get_page_title(page: Any) -> str:
                     candidates.append((size, txt))
     if not candidates:
         return ''
-    # Return the largest-font text (likely page title)
+    # Возвращаем текст с наибольшим размером шрифта (скорее всего заголовок)
     candidates.sort(key=lambda x: -x[0])
     return candidates[0][1][:200]
 
 
 # ---------------------------------------------------------------------------
-# FORMAT A parser — cross-reference matrix
-# e.g. hidravlichni-adaptery: rows = thread dims, cols = adapter types
+# Парсер ФОРМАТА A — матрица перекрёстных ссылок
+# Пример: hidravlichni-adaptery: строки = размеры резьбы, столбцы = типы адаптеров
 # ---------------------------------------------------------------------------
 
 def _parse_format_a(rows: List[List[str]], page_title: str, page_num: int) -> List[Dict]:
     """
-    Find all cells that are valid SKUs; attach thread-dimension attributes
-    from the row's first two columns and product-type from the column group header.
+    Находит все ячейки с валидными артикулами; прикрепляет атрибуты резьбовых размеров
+    из первых двух столбцов строки и тип товара из заголовка группы столбцов.
     """
     products = []
     n_cols = len(rows[0]) if rows else 0
 
-    # Find column group headers (appear in rows 0-5)
-    # Each 'номенклатура' header spans a group of columns.
-    # Row 0 often has the real category name; row 1 may have just 'номенклатура' —
-    # use setdefault so the first (real) name wins over the generic keyword.
+    # Ищем заголовки групп столбцов (обычно в строках 0–5).
+    # Строка 0 часто содержит реальное название категории; строка 1 может содержать
+    # просто 'номенклатура' — используем setdefault, чтобы первое (реальное) название
+    # не перезаписывалось общим ключевым словом.
     col_type_names: Dict[int, str] = {}
     for ri, row in enumerate(rows[:8]):
         for ci, cell in enumerate(row):
             if cell and any(kw in cell.lower() for kw in _NOMENKLATURA_KW):
                 col_type_names.setdefault(ci, cell.replace('\n', ' ').strip())
             elif cell and not any(c in cell for c in ['[', '"', '°', '/']):
-                # Could be adapter type name (e.g., "GZ BSP (конус 60°)")
+                # Возможно название типа адаптера (например, "GZ BSP (конус 60°)")
                 if len(cell) > 8 and ci > 1:
                     col_type_names.setdefault(ci, cell.replace('\n', ' ').strip())
 
-    # Find data rows (contain real SKUs in non-first columns)
+    # Находим начало строк с данными (содержат реальные артикулы не в первых столбцах)
     data_start = 0
     for ri, row in enumerate(rows):
         if _count_skus(row) >= 1 and ri >= 3:
@@ -194,7 +206,7 @@ def _parse_format_a(rows: List[List[str]], page_title: str, page_num: int) -> Li
             cell = row[ci].strip()
             if not cell or cell in _SKIP_VALUES:
                 continue
-            # Cells may contain multiple SKUs separated by newline
+            # Ячейка может содержать несколько артикулов, разделённых переносом строки
             for raw_sku in cell.split('\n'):
                 raw_sku = raw_sku.strip()
                 if not raw_sku or raw_sku in _SKIP_VALUES:
@@ -207,9 +219,9 @@ def _parse_format_a(rows: List[List[str]], page_title: str, page_num: int) -> Li
                 seen.add(sku)
 
                 col_type = col_type_names.get(ci, '')
-                # If col_type is just the generic keyword, strip it
+                # Если col_type содержит только ключевое слово — убираем его,
+                # оставляя только суффикс (например, "номенклатура (AISI 316)" → "AISI 316")
                 if col_type and all(kw in col_type.lower() for kw in ['номенклатур']):
-                    # Keep only non-keyword suffix (e.g. "номенклатура (AISI 316)" → "AISI 316")
                     suffix = re.sub(r'номенклатур[а-яА-Я]*\s*', '', col_type, flags=re.I).strip('() ')
                     col_type = suffix
 
@@ -230,14 +242,14 @@ def _parse_format_a(rows: List[List[str]], page_title: str, page_num: int) -> Li
 
 
 # ---------------------------------------------------------------------------
-# FORMAT B parser — multi-material product list
-# e.g. camlock: columns are (DN, з'єднання, d, різьба, SKU_alu, SKU_brass, ...)
+# Парсер ФОРМАТА B — список товаров с несколькими материалами
+# Пример: camlock: столбцы (DN, з'єднання, d, різьба, SKU_алюм, SKU_латунь, ...)
 # ---------------------------------------------------------------------------
 
 def _parse_format_b(rows: List[List[str]], page_title: str, page_num: int) -> List[Dict]:
     products = []
 
-    # Find category title (first non-empty row, single cell)
+    # Ищем название категории (первая непустая строка с одним значением)
     category = page_title
     for row in rows[:3]:
         non_empty = [c for c in row if c.strip()]
@@ -245,7 +257,7 @@ def _parse_format_b(rows: List[List[str]], page_title: str, page_num: int) -> Li
             category = non_empty[0].replace('\n', ' ').strip()
             break
 
-    # Find header row: contains "DN", "різьба", "номенклатура", dimension keywords
+    # Ищем строку заголовка: содержит "DN", "різьба", "номенклатура", размерные ключевые слова
     header_row_idx = None
     for ri, row in enumerate(rows[:8]):
         txt = _row_text(row)
@@ -256,7 +268,7 @@ def _parse_format_b(rows: List[List[str]], page_title: str, page_num: int) -> Li
             break
 
     if header_row_idx is None:
-        # Try to find it by SKU presence
+        # Резервный способ: ищем по наличию артикулов
         for ri, row in enumerate(rows[1:6], 1):
             if _has_skus_in_row(row):
                 header_row_idx = ri - 1
@@ -265,7 +277,7 @@ def _parse_format_b(rows: List[List[str]], page_title: str, page_num: int) -> Li
     if header_row_idx is None:
         return []
 
-    # Merge multi-row headers (sometimes split across 2-3 rows)
+    # Объединяем многострочные заголовки (иногда разбиты на 2–3 строки)
     headers = [''] * len(rows[header_row_idx])
     for ri in range(header_row_idx, min(header_row_idx + 3, len(rows))):
         row = rows[ri]
@@ -277,13 +289,13 @@ def _parse_format_b(rows: List[List[str]], page_title: str, page_num: int) -> Li
                     headers[ci] += ' ' + cell.strip()
     headers = [h.replace('\n', ' ').strip() for h in headers]
 
-    # Classify columns: dim cols vs sku cols
-    dim_cols: List[Tuple[int, str]] = []   # (col_idx, col_name)
-    sku_cols: List[Tuple[int, str]] = []   # (col_idx, material_label)
+    # Классифицируем столбцы: размерные vs артикульные
+    dim_cols: List[Tuple[int, str]] = []   # (индекс_столбца, название_столбца)
+    sku_cols: List[Tuple[int, str]] = []   # (индекс_столбца, название_материала)
     for ci, h in enumerate(headers):
         h_lo = h.lower()
         if any(kw in h_lo for kw in _NOMENKLATURA_KW):
-            # Extract material from header e.g. "номенклатура (алюміній)"
+            # Извлекаем материал из заголовка, например "номенклатура (алюміній)"
             mat = re.sub(r'номенклатур[а-я]*\s*', '', h, flags=re.I).strip('() ')
             sku_cols.append((ci, mat or 'SKU'))
         elif any(kw in h_lo for kw in _INDEX_KW):
@@ -292,7 +304,7 @@ def _parse_format_b(rows: List[List[str]], page_title: str, page_num: int) -> Li
             dim_cols.append((ci, h))
 
     data_start = header_row_idx + 1
-    # Skip sub-header rows (e.g., "[мм]", "[дюйми]")
+    # Пропускаем строки с единицами измерения (например, "[мм]", "[дюйми]")
     while data_start < len(rows):
         row_txt = _row_text(rows[data_start])
         if any(unit in row_txt for unit in ['[мм]', '[mm]', '[дюйм', '[bar]', '[m]', '[kg']):
@@ -305,13 +317,13 @@ def _parse_format_b(rows: List[List[str]], page_title: str, page_num: int) -> Li
         if not any(c.strip() for c in row):
             continue
 
-        # Build base attributes from dimension columns
+        # Формируем базовые атрибуты из размерных столбцов
         attrs_base = {}
         for ci, col_name in dim_cols:
             if ci < len(row) and row[ci].strip():
                 attrs_base[col_name] = row[ci].strip()
 
-        # Extract SKUs from SKU columns
+        # Извлекаем артикулы из столбцов SKU
         for ci, material in sku_cols:
             if ci >= len(row):
                 continue
@@ -319,7 +331,7 @@ def _parse_format_b(rows: List[List[str]], page_title: str, page_num: int) -> Li
             if not cell or cell in _SKIP_VALUES:
                 continue
 
-            # Cell may have multiple SKUs split by newline
+            # Ячейка может содержать несколько артикулов, разделённых переносом строки
             raw_skus = [s.strip() for s in cell.split('\n') if s.strip()]
             for raw_sku in raw_skus:
                 if raw_sku in _SKIP_VALUES:
@@ -335,7 +347,7 @@ def _parse_format_b(rows: List[List[str]], page_title: str, page_num: int) -> Li
                 if material and material != 'SKU':
                     attrs['Матеріал'] = material
 
-                # Build title from category + dims
+                # Формируем название из категории + размеры
                 dim_str = ', '.join(f"{k}: {v}" for k, v in list(attrs_base.items())[:3])
                 title = category
                 if dim_str:
@@ -354,14 +366,14 @@ def _parse_format_b(rows: List[List[str]], page_title: str, page_num: int) -> Li
 
 
 # ---------------------------------------------------------------------------
-# FORMAT C parser — simple product list
-# e.g. pneumatic fittings, hoses: row0=title, row1=series, row2=headers, rows3+=data
+# Парсер ФОРМАТА C — простой список товаров
+# Пример: пневматика, шланги: строка0=название, строка1=серия, строка2=заголовки, строки3+=данные
 # ---------------------------------------------------------------------------
 
 def _parse_format_c(rows: List[List[str]], page_title: str, page_num: int) -> List[Dict]:
     products = []
 
-    # Extract category title (first non-empty single-value row)
+    # Извлекаем название категории (первая непустая строка с одним значением)
     category = page_title
     series_code = ''
     for row in rows[:4]:
@@ -376,20 +388,20 @@ def _parse_format_c(rows: List[List[str]], page_title: str, page_num: int) -> Li
     if series_code and category:
         category = f"{category} ({series_code})"
 
-    # Find header row — index column takes priority over dimension keywords
+    # Ищем строку заголовка — столбец с индексом имеет приоритет над размерными ключевыми словами
     header_row_idx = None
-    # Priority 1: row explicitly containing 'індекс'/'index'/'артикул' etc.
+    # Приоритет 1: строка явно содержит 'індекс'/'index'/'артикул' и т.д.
     for ri, row in enumerate(rows[:10]):
         if _is_index_header_row(row):
             header_row_idx = ri
             break
-    # Priority 2: any dimension-keyword row (e.g. multi-row header tables)
+    # Приоритет 2: любая строка с размерными ключевыми словами (для многострочных заголовков)
     if header_row_idx is None:
         for ri, row in enumerate(rows[:6]):
             if _is_dimension_header_row(row):
                 header_row_idx = ri
                 break
-    # Fallback: find first row where the following row has SKUs
+    # Запасной вариант: первая строка, после которой идут артикулы
     if header_row_idx is None:
         for ri in range(len(rows) - 1):
             if _has_skus_in_row(rows[ri + 1]):
@@ -399,7 +411,7 @@ def _parse_format_c(rows: List[List[str]], page_title: str, page_num: int) -> Li
     if header_row_idx is None:
         return []
 
-    # Build headers (may span multiple rows)
+    # Формируем заголовки (могут занимать несколько строк)
     raw_headers = list(rows[header_row_idx])
     for ri in range(header_row_idx + 1, min(header_row_idx + 3, len(rows))):
         next_row = rows[ri]
@@ -409,7 +421,7 @@ def _parse_format_c(rows: List[List[str]], page_title: str, page_num: int) -> Li
             not c.strip() or re.match(r'^\[', c.strip()) for c in next_row if c.strip()
         )
         if all_units:
-            # Merge unit row into headers
+            # Объединяем строку с единицами измерения в заголовки
             for ci, cell in enumerate(next_row):
                 if ci < len(raw_headers) and cell.strip():
                     raw_headers[ci] += ' ' + cell.strip()
@@ -417,14 +429,14 @@ def _parse_format_c(rows: List[List[str]], page_title: str, page_num: int) -> Li
 
     headers = [h.replace('\n', ' ').strip() for h in raw_headers]
 
-    # Find SKU column
+    # Находим столбец с артикулом
     sku_col = -1
     for ci, h in enumerate(headers):
         if any(kw in h.lower() for kw in _INDEX_KW):
             sku_col = ci
             break
     if sku_col == -1:
-        # Guess: first column that has SKU-looking values in data
+        # Угадываем: первый столбец, в котором данные похожи на артикулы
         for ci in range(len(headers)):
             sku_vals = sum(
                 1 for row in rows[header_row_idx + 1: header_row_idx + 6]
@@ -436,7 +448,7 @@ def _parse_format_c(rows: List[List[str]], page_title: str, page_num: int) -> Li
     if sku_col == -1:
         return []
 
-    # Attribute columns (everything except SKU and weight/price)
+    # Столбцы атрибутов (всё, кроме артикула, веса и цены)
     attr_cols: List[Tuple[int, str]] = [
         (ci, h) for ci, h in enumerate(headers)
         if ci != sku_col and h and not any(kw in h.lower() for kw in _SKIP_COL_KW)
@@ -447,7 +459,7 @@ def _parse_format_c(rows: List[List[str]], page_title: str, page_num: int) -> Li
         if sku_col >= len(row):
             continue
         cell = row[sku_col].strip()
-        # Some cells have multiple SKUs (e.g., "MW-2001B01\nMW-2001A01")
+        # Некоторые ячейки содержат несколько артикулов (например, "MW-2001B01\nMW-2001A01")
         raw_skus = [s.strip() for s in cell.split('\n') if s.strip()]
         if not raw_skus:
             continue
@@ -465,7 +477,7 @@ def _parse_format_c(rows: List[List[str]], page_title: str, page_num: int) -> Li
                 continue
             seen.add(sku)
 
-            # Build title from category + first 2 attrs
+            # Формируем название из категории + первые 2 атрибута
             dim_str = ', '.join(f"{k}: {v}" for k, v in list(attrs.items())[:2] if v)
             title = category
             if dim_str:
@@ -484,7 +496,7 @@ def _parse_format_c(rows: List[List[str]], page_title: str, page_num: int) -> Li
 
 
 # ---------------------------------------------------------------------------
-# Main entry point
+# Основная точка входа
 # ---------------------------------------------------------------------------
 
 def parse_pdf(
@@ -494,8 +506,8 @@ def parse_pdf(
     category_id: int,
 ) -> Tuple[List[Dict], int]:
     """
-    Parse a Tubes International product catalog PDF without any LLM.
-    Returns (products_list, page_count).
+    Парсит PDF-каталог Tubes International без использования LLM.
+    Возвращает (список_товаров, количество_страниц).
     """
     try:
         pdf = fitz.open(stream=pdf_bytes, filetype='pdf')
@@ -513,7 +525,7 @@ def parse_pdf(
                     if not rows:
                         continue
 
-                    # Normalise: all cells to str, strip
+                    # Нормализуем: все ячейки приводим к строке и убираем пробелы
                     rows = [[str(c or '').strip() for c in row] for row in rows]
 
                     fmt = _detect_format(rows)
@@ -527,7 +539,7 @@ def parse_pdf(
                     else:
                         prods = _parse_format_c(rows, page_title, page_num)
 
-                    # De-duplicate across pages
+                    # Дедупликация между страницами
                     for p in prods:
                         if p['sku'] and p['sku'] in seen_skus:
                             continue
@@ -540,7 +552,7 @@ def parse_pdf(
                     if prods:
                         logger.debug(
                             f"Doc#{doc_id} p{page_num} fmt={fmt}: "
-                            f"{len(prods)} products from table {rows[0][0][:30]!r}"
+                            f"{len(prods)} товаров из таблицы {rows[0][0][:30]!r}"
                         )
 
             except Exception as exc:
@@ -548,9 +560,9 @@ def parse_pdf(
                 continue
 
         pdf.close()
-        logger.info(f"Doc#{doc_id}: {len(all_products)} products / {page_count} pages")
+        logger.info(f"Doc#{doc_id}: {len(all_products)} товаров / {page_count} страниц")
         return all_products, page_count
 
     except Exception as exc:
-        logger.error(f"Doc#{doc_id}: PDF parse error: {exc}")
+        logger.error(f"Doc#{doc_id}: Ошибка парсинга PDF: {exc}")
         return [], 0
