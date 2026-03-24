@@ -339,8 +339,19 @@ export default function AdminPage() {
               style={{ padding: '10px 14px', borderRadius: 8, border: 'none', background: running ? '#374151' : '#dc2626', color: running ? '#6b7280' : '#fff', cursor: running ? 'not-allowed' : 'pointer', fontSize: 12, fontWeight: 600, textAlign: 'left' }}
             >
               ▶ Імпортувати всі PDF
-              <div style={{ fontSize: 10, fontWeight: 400, opacity: .7, marginTop: 2 }}>189 PDF · перезаписує існуючі</div>
+              <div style={{ fontSize: 10, fontWeight: 400, opacity: .7, marginTop: 2 }}>Нові + повторні помилки</div>
             </button>
+
+            {(status?.error ?? 0) > 0 && (
+              <button
+                onClick={() => doAction('/api/admin/retry-errors', `🔄 Повторний парсинг ${status?.error ?? 0} помилкових PDF`)}
+                disabled={!!running}
+                style={{ padding: '9px 14px', borderRadius: 8, border: '1px solid #7c2d12', background: 'rgba(124,45,18,.15)', color: '#fb923c', cursor: running ? 'not-allowed' : 'pointer', fontSize: 12, fontWeight: 600, textAlign: 'left' }}
+              >
+                🔁 Повторити помилки ({status?.error ?? 0})
+                <div style={{ fontSize: 10, fontWeight: 400, opacity: 0.7, marginTop: 2 }}>Тільки error-документи</div>
+              </button>
+            )}
 
             <button
               onClick={() => doAction('/api/admin/rebuild-search-text', '🔄 Переіндексацію пошуку запущено')}

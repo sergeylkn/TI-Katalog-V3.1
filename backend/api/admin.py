@@ -67,10 +67,11 @@ async def get_import_status(db: AsyncSession = Depends(get_db)):
     """Статус імпорту PDF-документів та кількість товарів у базі."""
     try:
         total      = await db.scalar(select(func.count(Document.id))) or 0
+        # importer.py використовує статуси: pending / parsing / done / error
         pending    = await db.scalar(select(func.count(Document.id)).where(Document.status == "pending")) or 0
-        processing = await db.scalar(select(func.count(Document.id)).where(Document.status == "processing")) or 0
-        completed  = await db.scalar(select(func.count(Document.id)).where(Document.status == "completed")) or 0
-        failed     = await db.scalar(select(func.count(Document.id)).where(Document.status == "failed")) or 0
+        processing = await db.scalar(select(func.count(Document.id)).where(Document.status == "parsing")) or 0
+        completed  = await db.scalar(select(func.count(Document.id)).where(Document.status == "done")) or 0
+        failed     = await db.scalar(select(func.count(Document.id)).where(Document.status == "error")) or 0
         products   = await db.scalar(select(func.count(Product.id))) or 0
 
         return {
@@ -179,8 +180,39 @@ async def get_parse_logs(limit: int = Query(150, le=500), db: AsyncSession = Dep
 
 @router.post("/import-all-pdfs")
 async def import_all_pdfs(background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
-    """Запуск повного імпорту всіх PDF з R2."""
+    """Запуск повного імпорту всіх PDF з R2. Повторно обробляє error/зависші docs."""
     background_tasks.add_task(run_import_all, db)
+    return {"status": "started"}
+
+
+@router.post("/retry-errors")
+async def retry_errors(background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
+    """Повторний парсинг тільки документів зі статусом error."""
+    async def _task():
+        try:
+            stmt = select(Document).where(Document.status == "error")
+            result = await db.execute(stmt)
+            docs = result.scalars().all()
+            if not docs:
+                bus.push({"type": "log", "level": "info", "msg": "ℹ Немає документів з помилками"})
+                return
+            bus.push({"type": "log", "level": "info", "msg": f"🔄 Повторний парсинг: {len(docs)} документів з помилками"})
+            for d in docs:
+                d.status = "pending"
+            await db.commit()
+            for idx, d in enumerate(docs):
+                try:
+                    from services.importer import parse_one
+                    await parse_one(d.id)
+                except Exception as e:
+                    pass
+                bus.push({"type": "progress", "done": idx + 1, "total": len(docs),
+                          "pct": round((idx + 1) / len(docs) * 100), "current": d.name})
+            bus.push({"type": "log", "level": "done", "msg": f"✅ Повторний парсинг завершено: {len(docs)} документів"})
+        except Exception as e:
+            bus.push({"type": "log", "level": "error", "msg": f"❌ {str(e)[:200]}"})
+
+    background_tasks.add_task(_task)
     return {"status": "started"}
 
 

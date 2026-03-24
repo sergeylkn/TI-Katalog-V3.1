@@ -353,11 +353,20 @@ async def run_import_all(db=None):
             await db.commit()
             return
 
-        new_ids = []
+        queue_ids = []
+        retry_ids = []  # документи с ошибкой или зависшие в "parsing"
+
         for fname in files:
             url = f"{R2_BASE}/{fname}"
             r = await db.execute(select(Document).where(Document.file_url == url))
-            if r.scalar_one_or_none():
+            existing = r.scalar_one_or_none()
+
+            if existing:
+                # Повторно обрабатываем: error-документы и зависшие в "parsing"
+                if existing.status in ("error", "parsing"):
+                    existing.status = "pending"
+                    retry_ids.append(existing.id)
+                # done/pending — пропускаем
                 continue
 
             cat_slug, sec_slug = _parse_filename(fname)
@@ -374,14 +383,18 @@ async def run_import_all(db=None):
                 document_id=doc.id, document_name=fname, status="queued",
                 message=f"{cat.name} → {sec.name}"
             ))
-            new_ids.append(doc.id)
+            queue_ids.append(doc.id)
 
         await db.commit()
-        logger.info(f"✅ Queued {len(new_ids)} documents")
-        _live(f"✅ Черга: {len(new_ids)} документів додано до обробки", "info")
 
-        total_docs = len(new_ids)
-        for idx, doc_id in enumerate(new_ids):
+        all_ids = queue_ids + retry_ids
+        logger.info(f"✅ Черга: {len(queue_ids)} нових + {len(retry_ids)} повторних документів")
+        _live(f"✅ Черга: {len(queue_ids)} нових + {len(retry_ids)} повторних документів", "info")
+
+        total_docs = len(all_ids)
+        if total_docs == 0:
+            _live("ℹ Всі PDF вже оброблено. Для повторного імпорту очистіть БД.", "info")
+        for idx, doc_id in enumerate(all_ids):
             try:
                 await parse_one(doc_id)
             except Exception as e:
@@ -400,6 +413,8 @@ async def parse_one(doc_id: int):
         doc = await db.get(Document, doc_id)
         if not doc or doc.status in ("parsing", "done"):
             return
+        # Зависший в "parsing" от предыдущего запуска — разрешаем повторно
+        # (run_import_all уже сбросил его в "pending" перед вызовом)
         doc.status = "parsing"
         await db.commit()
 
