@@ -167,7 +167,9 @@ def _clean_sku(val: str) -> str:
 
 # Ключевые слова для столбца с артикулом
 _INDEX_KW = {'індекс', 'indeks', 'index', 'артикул', 'article', 'sku',
-             'код', 'code', 'ref', 'part', 'номенклатура'}
+             'код', 'code', 'ref', 'part', 'номенклатура',
+             'art', 'order', 'poz', 'numer', 'catalog no', 'cat.no', 'nr kat',
+             'item', 'type no', 'type-no', 'ordering'}
 # Столбцы, которые пропускаем (вес, цена)
 _SKIP_COL_KW = {'вага', 'weight', 'kg', 'кг', 'ціна', 'price'}
 # Ключевые слова размерных параметров
@@ -231,13 +233,18 @@ def _detect_format(rows: List[List[str]]) -> str:
             return 'A'
         return 'B'
 
+    # Формат A без 'номенклатура': матрица, где много строк с ≥2 SKU в столбцах
+    sku_rows_matrix = sum(1 for r in rows[1:] if _count_skus(r) >= 2)
+    if sku_rows_matrix >= 2 and n_cols >= 3:
+        return 'A'
+
     # Формат C: простой список с столбцом-индексом
-    for r in rows[:5]:
+    for r in rows[:8]:
         if _is_index_header_row(r):
             return 'C'
 
-    # Если строки содержат артикулы → считаем Форматом C
-    for r in rows[1:5]:
+    # Если строки содержат артикулы → считаем Форматом C (расширен диапазон проверки)
+    for r in rows[1:10]:
         if _has_skus_in_row(r):
             return 'C'
 
@@ -296,9 +303,10 @@ def _parse_format_a(rows: List[List[str]], page_title: str, page_num: int) -> Li
                     col_type_names.setdefault(ci, cell.replace('\n', ' ').strip())
 
     # Находим начало строк с данными (содержат реальные артикулы не в первых столбцах)
-    data_start = 0
+    # ri >= 1 чтобы пропустить строку заголовков, но захватить матрицы без 'номенклатура'
+    data_start = 1
     for ri, row in enumerate(rows):
-        if _count_skus(row) >= 1 and ri >= 3:
+        if _count_skus(row) >= 1 and ri >= 1:
             data_start = ri
             break
 
@@ -691,6 +699,12 @@ def parse_pdf(
 
                     fmt = _detect_format(rows)
                     if fmt == 'SKIP':
+                        # Диагностика: показываем первые 2 строки пропущенной таблицы
+                        preview = ' | '.join(
+                            '[' + ', '.join(c[:15] for c in r if c)[:60] + ']'
+                            for r in rows[:2]
+                        )
+                        logger.info(f"Doc#{doc_id} p{page_num} SKIP({len(rows)}r×{len(rows[0])}c): {preview[:120]}")
                         continue
 
                     if fmt == 'A':
@@ -716,11 +730,10 @@ def parse_pdf(
                         p['certifications'] = page_certifications
                         all_products.append(p)
 
-                    if prods:
-                        logger.debug(
-                            f"Doc#{doc_id} p{page_num} fmt={fmt}: "
-                            f"{len(prods)} товаров из таблицы {rows[0][0][:30]!r}"
-                        )
+                    logger.info(
+                        f"Doc#{doc_id} p{page_num} fmt={fmt}: "
+                        f"{len(prods)} товаров, заголовок {rows[0][0][:40]!r}"
+                    )
 
             except Exception as exc:
                 logger.warning(f"Doc#{doc_id} p{page_num}: {exc}")
