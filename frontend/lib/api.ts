@@ -18,6 +18,7 @@ export interface Product {
   page_number: number | null
   document_id: number; section_id: number | null; category_id: number | null
   document_url: string
+  doc_page_count: number | null
 }
 export interface SearchResult extends Product {
   _score: number; _match: string

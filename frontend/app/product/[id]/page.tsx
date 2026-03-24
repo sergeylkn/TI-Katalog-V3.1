@@ -242,6 +242,7 @@ export default function ProductPage() {
         <PdfModal
           docId={p.document_id}
           pageNumber={p.page_number || 1}
+          pageCount={p.doc_page_count || undefined}
           title={p.title}
           pdfUrl={pdfUrl || undefined}
           onClose={() => setPdfOpen(false)}

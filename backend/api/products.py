@@ -27,6 +27,7 @@ def _prod(p: Product, doc: Document = None) -> dict:
         "category_id": p.category_id,
         "document_url": doc.file_url if doc else "",
         "image_url": f"/api/products/{p.id}/image" if (p.image_bbox or p.page_number) else "",
+        "doc_page_count": doc.page_count if doc else None,
     }
 
 
