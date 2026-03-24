@@ -366,6 +366,64 @@ a:hover { text-decoration: underline; }
   font-family: var(--font-mono);
 }
 
+/* ── Category Cards v2 (with SVG illustrations) ────────────────────────────── */
+.cat-grid-v2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 20px;
+}
+.cat-card-v2 {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+  cursor: pointer;
+  transition: transform 0.25s, box-shadow 0.25s, border-color 0.25s;
+  text-decoration: none;
+  color: inherit;
+  display: block;
+  position: relative;
+}
+.cat-card-v2:hover {
+  transform: translateY(-5px);
+  box-shadow: 0 16px 40px rgba(0,0,0,0.45), 0 0 0 1px rgba(196,30,30,0.2);
+  border-color: rgba(196,30,30,0.3);
+  text-decoration: none;
+}
+.cat-card-v2:hover .cat-arrow {
+  transform: translateX(4px);
+  color: var(--accent);
+}
+.cat-card-body {
+  padding: 16px 18px 18px;
+  position: relative;
+}
+.cat-name-v2 {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.35;
+  margin-bottom: 8px;
+  letter-spacing: -0.01em;
+}
+.cat-meta-v2 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text3);
+  font-family: var(--font-mono);
+}
+.cat-dot { opacity: 0.4; }
+.cat-arrow {
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  font-size: 16px;
+  color: var(--text3);
+  transition: transform 0.2s, color 0.2s;
+}
+
 /* ── Section List (inside category) ───────────────────────────────────────── */
 .section-list { display: flex; flex-direction: column; gap: 8px; }
 .section-item {
@@ -701,6 +759,7 @@ a:hover { text-decoration: underline; }
 @media (max-width: 768px) {
   .hero h1 { font-size: 30px; }
   .cat-grid { grid-template-columns: repeat(2, 1fr); }
+  .cat-grid-v2 { grid-template-columns: repeat(2, 1fr); gap: 12px; }
   .prod-grid { grid-template-columns: repeat(2, 1fr); }
   .nav-links { display: none; }
   .topbar { display: none; }
@@ -709,6 +768,7 @@ a:hover { text-decoration: underline; }
 @media (max-width: 480px) {
   .prod-grid { grid-template-columns: 1fr; }
   .cat-grid { grid-template-columns: 1fr; }
+  .cat-grid-v2 { grid-template-columns: 1fr; }
 }
 
 @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
