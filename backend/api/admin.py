@@ -296,6 +296,101 @@ async def rebuild_search_text(background_tasks: BackgroundTasks, db: AsyncSessio
     return {"status": "started"}
 
 
+@router.post("/generate-embeddings")
+async def generate_embeddings(background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
+    """Генерація OpenAI embeddings для всіх товарів (text-embedding-3-small)."""
+    async def _task():
+        import httpx, asyncio
+        key = os.getenv("OPENAI_API_KEY", "")
+        if not key:
+            bus.push({"type": "log", "level": "error", "msg": "❌ OPENAI_API_KEY не налаштовано"})
+            return
+
+        bus.push({"type": "log", "level": "info", "msg": "🤖 Починаємо генерацію embeddings..."})
+
+        # Завантажуємо тільки товари без embeddings
+        from sqlalchemy import text as sql_text
+        result = await db.execute(
+            select(Product.id, Product.title, Product.sku, Product.description,
+                   Product.certifications, Product.attributes)
+            .where(Product.embedding == None)
+        )
+        rows = result.all()
+        total = len(rows)
+        bus.push({"type": "log", "level": "info", "msg": f"📋 Товарів без embeddings: {total}"})
+
+        if not total:
+            bus.push({"type": "log", "level": "done", "msg": "✅ Всі товари вже мають embeddings"})
+            return
+
+        BATCH = 50
+        done = 0
+        errors = 0
+
+        for i in range(0, total, BATCH):
+            batch = rows[i: i + BATCH]
+            texts = []
+            for row in batch:
+                attrs = " ".join(str(v) for v in (row.attributes or {}).values() if v)
+                txt = f"{row.title} {row.sku or ''} {row.description or ''} {attrs} {row.certifications or ''}"
+                texts.append(txt[:2000])
+
+            try:
+                async with httpx.AsyncClient(timeout=30) as c:
+                    r = await c.post(
+                        "https://api.openai.com/v1/embeddings",
+                        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                        json={"model": "text-embedding-3-small", "input": texts},
+                    )
+                    if r.status_code != 200:
+                        errors += len(batch)
+                        bus.push({"type": "log", "level": "error", "msg": f"❌ OpenAI error {r.status_code}: {r.text[:100]}"})
+                        await asyncio.sleep(2)
+                        continue
+
+                    embeddings = r.json()["data"]
+
+                # Зберігаємо embeddings
+                async with __import__("core.database", fromlist=["AsyncSessionLocal"]).AsyncSessionLocal() as db2:
+                    for j, emb_data in enumerate(embeddings):
+                        prod = await db2.get(Product, batch[j].id)
+                        if prod:
+                            prod.embedding = emb_data["embedding"]
+                    await db2.commit()
+
+                done += len(batch)
+                pct = round(done / total * 100)
+                bus.push({"type": "progress", "done": done, "total": total, "pct": pct,
+                          "current": f"embeddings {done}/{total}"})
+                if done % 500 == 0:
+                    bus.push({"type": "log", "level": "info", "msg": f"  ↻ {done}/{total} embeddings згенеровано..."})
+
+            except Exception as e:
+                errors += len(batch)
+                logger.error(f"Embeddings batch {i}: {e}")
+
+            await asyncio.sleep(0.1)  # rate limit
+
+        bus.push({"type": "log", "level": "done",
+                  "msg": f"✅ Embeddings згенеровано: {done} товарів, помилок: {errors}"})
+
+    background_tasks.add_task(_task)
+    return {"status": "started"}
+
+
+@router.get("/embedding-stats")
+async def embedding_stats(db: AsyncSession = Depends(get_db)):
+    """Кількість товарів з embeddings."""
+    try:
+        total = await db.scalar(select(func.count(Product.id))) or 0
+        with_emb = await db.scalar(
+            select(func.count(Product.id)).where(Product.embedding != None)
+        ) or 0
+        return {"total": total, "with_embeddings": with_emb, "without": total - with_emb}
+    except Exception as e:
+        return {"total": 0, "with_embeddings": 0, "without": 0, "error": str(e)}
+
+
 @router.post("/rebuild-indexes")
 async def rebuild_indexes(background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
     """Перебудова таблиці product_indexes."""

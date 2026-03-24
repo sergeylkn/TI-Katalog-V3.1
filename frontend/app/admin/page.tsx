@@ -422,6 +422,14 @@ export default function AdminPage() {
             </button>
 
             <button
+              onClick={() => doAction('/api/admin/generate-embeddings', '🤖 Генерацію embeddings запущено (~$0.15)')}
+              style={{ padding: '9px 14px', borderRadius: 8, border: '1px solid #065f46', background: 'rgba(6,95,70,.15)', color: '#34d399', cursor: 'pointer', fontSize: 12, fontWeight: 600, textAlign: 'left' }}
+            >
+              🤖 Згенерувати embeddings
+              <div style={{ fontSize: 10, fontWeight: 400, opacity: .7, marginTop: 2 }}>OpenAI · семантичний пошук · ~$0.15</div>
+            </button>
+
+            <button
               onClick={refreshStatus}
               style={{ padding: '7px 14px', borderRadius: 8, border: '1px solid #334155', background: 'transparent', color: '#64748b', cursor: 'pointer', fontSize: 12 }}
             >
