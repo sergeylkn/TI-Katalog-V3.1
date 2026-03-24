@@ -19,11 +19,121 @@
 
 import re
 import logging
-from typing import List, Dict, Tuple, Any, Optional
+from typing import List, Dict, Tuple, Any, Optional, Set
 
 import fitz  # PyMuPDF ≥ 1.23
 
 logger = logging.getLogger("pdf_parser")
+
+
+# ---------------------------------------------------------------------------
+# Извлечение описания и сертификатов со страницы
+# ---------------------------------------------------------------------------
+
+# Паттерны сертификатов и стандартов, встречающихся в каталогах Tubes International
+_CERT_RE = re.compile(
+    r'(?:'
+    r'FDA\s+\d+\s+CFR[\s\d\.]+(?:\d{4,7})?|'           # FDA 21 CFR 175.300
+    r'(?:EC|EU)\s+(?:Regulation\s+)?\d{3,}/\d{4}[^,\s]*|'  # EC 1935/2004
+    r'\d{4}/\d{4}/(?:EC|EU)\b|'                          # 1935/2004/EC
+    r'10/\d{4}/EU\b|'                                    # 10/2011/EU
+    r'2023/\d{4}/EC\b|'
+    r'ISO\s+\d{4,}(?:[:-]\d+)?|'                        # ISO 4628-2
+    r'EN\s+\d{4,}(?:[:-]\d+)?|'                         # EN 14420-7
+    r'DIN\s+\d{4,}|'                                    # DIN 20022
+    r'NSF(?:/ANSI)?(?:\s*\d+)?|'                        # NSF/ANSI 61
+    r'ATEX(?:\s+II\s+[\w\s]+)?|'                        # ATEX
+    r'REACH\b|'
+    r'RoHS\b|'
+    r'3-A\s+\d+|'
+    r'USP\s+Class\s+VI|'
+    r'DNV[-\s]?GL|'
+    r'Lloyd\'?s\s+Register|'
+    r'WRAS\b|'
+    r'KTW\b|'
+    r'W-\d{3}\b|'
+    r'DVGW\b|'
+    r'GMP\b|'
+    r'CE\b(?!\s*(?:RT|FE|ment|ramic|nter|ll|N|D))'     # CE Mark (не слова типа "center")
+    r')',
+    re.IGNORECASE
+)
+
+_MIN_DESCRIPTION_LEN = 40  # минимум символов для текстового блока описания
+
+
+def _extract_certs_from_text(text: str) -> str:
+    """Извлекает уникальные упоминания сертификатов из произвольного текста."""
+    found = []
+    seen: Set[str] = set()
+    for m in _CERT_RE.finditer(text):
+        val = re.sub(r'\s+', ' ', m.group(0).strip())
+        key = val.upper()
+        if key not in seen and len(key) >= 2:
+            seen.add(key)
+            found.append(val)
+    return '; '.join(found)
+
+
+def _get_page_text_and_certs(page: Any, tables) -> Tuple[str, str]:
+    """
+    Извлекает описательный текст и сертификаты со страницы.
+
+    Алгоритм:
+    1. Определяет Y-координату начала первой таблицы С данными (SKU-ячейки).
+    2. Собирает текстовые блоки в диапазоне y ∈ [65, first_data_y0).
+    3. Из НЕ-данных таблиц (sku=0) — тоже собирает текст для поиска сертификатов.
+    4. Возвращает (description, certifications).
+    """
+    page_h = page.rect.height
+
+    # Определяем Y начала первой data-таблицы
+    data_table_y0 = page_h
+    for tbl in tables:
+        rows = tbl.extract()
+        if not rows:
+            continue
+        rows_s = [[str(c or '').strip() for c in row] for row in rows]
+        if any(_is_sku(c) for row in rows_s for c in row if c):
+            data_table_y0 = min(data_table_y0, tbl.bbox[1])
+            break
+
+    # Сбор текстовых блоков страницы
+    description_parts = []
+    cert_text_parts = []
+
+    for b in page.get_text('blocks'):
+        if b[6] != 0:  # не текстовый блок
+            continue
+        bx0, by0, bx1, by1, btext = b[0], b[1], b[2], b[3], b[4]
+        btext = btext.strip()
+        if not btext:
+            continue
+        # Пропускаем шапку (лого, колонтитулы) и подвал
+        if by0 < _LOGO_MAX_Y0 or by0 > page_h * _FOOTER_Y_RATIO:
+            continue
+
+        cert_text_parts.append(btext)
+
+        # Описание — только ДО первой data-таблицы, длинные блоки
+        if by0 < data_table_y0 and len(btext) >= _MIN_DESCRIPTION_LEN:
+            description_parts.append(btext.replace('\n', ' ').strip())
+
+    # Также берём текст из описательных таблиц (без SKU) для поиска сертификатов
+    for tbl in tables:
+        rows = tbl.extract()
+        if not rows:
+            continue
+        rows_s = [[str(c or '').strip() for c in row] for row in rows]
+        if not any(_is_sku(c) for row in rows_s for c in row if c):
+            tbl_text = ' '.join(c for row in rows_s for c in row if c)
+            if len(tbl_text) >= 20:
+                cert_text_parts.append(tbl_text)
+
+    description = ' | '.join(description_parts)[:1500]
+    certifications = _extract_certs_from_text(' '.join(cert_text_parts))
+
+    return description, certifications
 
 
 # ---------------------------------------------------------------------------
@@ -496,6 +606,53 @@ def _parse_format_c(rows: List[List[str]], page_title: str, page_num: int) -> Li
 
 
 # ---------------------------------------------------------------------------
+# Определение bbox основного изображения товара на странице
+# ---------------------------------------------------------------------------
+
+# Лого Tubes International: bbox ≈ [42.6, 30.5, 147.6, 57.0], всегда в шапке y0 < 65
+_LOGO_MAX_Y0 = 65        # изображения выше этой точки — лого в шапке
+_MIN_IMG_AREA = 500      # минимальная площадь чтобы отсечь крошечные иконки
+_FOOTER_Y_RATIO = 0.88   # изображения ниже 88% высоты страницы — footer/декор
+
+def _get_page_main_image_bbox(page: Any) -> Optional[Dict]:
+    """
+    Находит bbox основного изображения товара на странице.
+    Игнорирует: логотип (y0 < 65), footer (y0 > 88%) и крошечные иконки (<500 pt²).
+    Возвращает bbox наибольшего подходящего изображения, или None.
+    """
+    page_h = page.rect.height
+    best: Optional[Dict] = None
+    best_area = 0.0
+
+    for img in page.get_images(full=True):
+        xref = img[0]
+        try:
+            for r in page.get_image_rects(xref):
+                area = (r.x1 - r.x0) * (r.y1 - r.y0)
+                # Исключаем крошечные иконки
+                if area < _MIN_IMG_AREA:
+                    continue
+                # Исключаем лого в шапке (всегда y0 < 65 на этих PDF)
+                if r.y0 < _LOGO_MAX_Y0:
+                    continue
+                # Исключаем footer-изображения
+                if r.y0 > page_h * _FOOTER_Y_RATIO:
+                    continue
+                if area > best_area:
+                    best_area = area
+                    best = {
+                        'x0': round(r.x0, 1),
+                        'y0': round(r.y0, 1),
+                        'x1': round(r.x1, 1),
+                        'y1': round(r.y1, 1),
+                    }
+        except Exception:
+            pass
+
+    return best
+
+
+# ---------------------------------------------------------------------------
 # Основная точка входа
 # ---------------------------------------------------------------------------
 
@@ -518,7 +675,11 @@ def parse_pdf(
         for page_num, page in enumerate(pdf, start=1):
             try:
                 page_title = _get_page_title(page)
+                # Определяем главное изображение страницы один раз для всех товаров
+                page_img_bbox = _get_page_main_image_bbox(page)
                 tabs = page.find_tables()
+                # Извлекаем описание и сертификаты со страницы
+                page_description, page_certifications = _get_page_text_and_certs(page, tabs.tables)
 
                 for tbl in tabs.tables:
                     rows = tbl.extract()
@@ -539,7 +700,7 @@ def parse_pdf(
                     else:
                         prods = _parse_format_c(rows, page_title, page_num)
 
-                    # Дедупликация между страницами
+                    # Дедупликация между страницами + привязка bbox изображения
                     for p in prods:
                         if p['sku'] and p['sku'] in seen_skus:
                             continue
@@ -547,6 +708,12 @@ def parse_pdf(
                             seen_skus.add(p['sku'])
                         p['section_id'] = section_id
                         p['category_id'] = category_id
+                        # Сохраняем bbox изображения страницы для endpoint /image
+                        p['image_bbox'] = page_img_bbox or {}
+                        # Заполняем описание и сертификаты (форматные парсеры дают пустые строки)
+                        if not p.get('description'):
+                            p['description'] = page_description
+                        p['certifications'] = page_certifications
                         all_products.append(p)
 
                     if prods:

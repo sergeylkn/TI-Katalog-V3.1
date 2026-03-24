@@ -256,10 +256,14 @@ def _extract_params(q: str) -> dict:
 
 def _cat_hints(q: str) -> list:
     q_l = q.lower()
+    seen, result = set(), []
     for kw, hints in CATEGORY_HINTS.items():
         if kw in q_l:
-            return hints
-    return []
+            for h in hints:
+                if h not in seen:
+                    seen.add(h)
+                    result.append(h)
+    return result
 
 
 async def _vec(q: str, n: int = 40) -> List[int]:
@@ -545,11 +549,17 @@ async def ai_recommend(
     top5 = scored[:5]
 
     # Build AI advice
+    def _pick(attrs: dict, *kws) -> str:
+        for k, v in attrs.items():
+            if any(kw in k.lower() for kw in kws):
+                return str(v)[:30]
+        return ''
+
     prod_ctx = '\n'.join(
         f'- {p.title}' + (f' [{p.sku}]' if p.sku else '') +
-        (f' | DN:{p.attributes.get("DN","?")}' if p.attributes.get("DN") else '') +
-        (f' | {p.attributes.get("Тиск_бар","")} bar' if p.attributes.get("Тиск_бар") else '') +
-        (f' | {p.attributes.get("Матеріал","")[:30]}' if p.attributes.get("Матеріал") else '')
+        (f' | DN:{_pick(p.attributes or {}, "dn","d_вн","inner","nominal")}' if _pick(p.attributes or {}, "dn","d_вн","inner","nominal") else '') +
+        (f' | {_pick(p.attributes or {}, "тиск","pressure","bar","pn")} bar' if _pick(p.attributes or {}, "тиск","pressure","bar","pn") else '') +
+        (f' | {_pick(p.attributes or {}, "матер","material")}' if _pick(p.attributes or {}, "матер","material") else '')
         for p in top5
     ) or 'Товарів не знайдено'
 

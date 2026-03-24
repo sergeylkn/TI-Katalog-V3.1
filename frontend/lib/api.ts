@@ -51,6 +51,8 @@ export const api = {
   getProduct:      (id: number) => req<Product>(`/api/products/${id}`),
   recommendations: (id: number) => req<{ recommendations: Product[] }>(`/api/products/${id}/recommendations`),
   imageUrl:        (id: number) => `${API}/api/products/${id}/image`,
+  docPageUrl:      (docId: number, page: number, scale = 1.8) =>
+    `${API}/api/documents/${docId}/page/${page}/image?scale=${scale}`,
 
   // Search
   search: (q: string, p = 1, ps = 20, section_id?: number, category_id?: number) => {

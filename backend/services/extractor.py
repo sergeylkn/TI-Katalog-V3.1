@@ -73,24 +73,32 @@ async def extract_products(
 
             # Формирование поискового индекса
             attr_values = [str(v) for v in attributes.values() if v]
-            search_text = f"{title} {sku} {' '.join(attr_values)} {certifications}".lower()
+            search_text = f"{title} {sku} {description} {' '.join(attr_values)} {certifications}".lower()
+
+            # page_number берём из данных парсера (реальная страница PDF),
+            # page_num — это page_count, переданный как аргумент (fallback)
+            actual_page = p_data.get("page_number") or page_num
 
             # Создание объекта модели
             new_product = Product(
                 document_id=doc.id,
                 section_id=doc.section_id,
+                category_id=p_data.get("category_id") or getattr(doc, "category_id", None),
                 title=str(title)[:255],
                 sku=str(sku)[:100],
                 description=str(description),
                 certifications=certifications,
                 attributes=attributes,
                 variants=variants,
-                page_number=page_num,
+                page_number=actual_page,
                 search_text=search_text,
-                image_bbox=p_data.get("image_bbox", {})
+                image_bbox=p_data.get("image_bbox") or {},
             )
 
             db.add(new_product)
+            await db.flush()  # получаем new_product.id для индексатора
+            from services.indexer import index_product
+            await index_product(new_product, db)
             added_count += 1
 
         except Exception as e:

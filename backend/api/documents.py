@@ -1,5 +1,6 @@
 """Documents + Categories API."""
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from core.database import get_db
@@ -66,6 +67,53 @@ async def list_documents(db: AsyncSession = Depends(get_db)):
     docs = (await db.execute(select(Document).order_by(Document.name))).scalars().all()
     return [{"id": d.id, "name": d.name, "status": d.status,
              "page_count": d.page_count} for d in docs]
+
+
+@router.get("/{doc_id}/page/{page_num}/image")
+async def doc_page_image(
+    doc_id: int,
+    page_num: int,
+    scale: float = Query(1.5, ge=0.5, le=3.0),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Рендерит указанную страницу PDF как PNG-изображение.
+    Используется PDF-модальным окном вместо iframe для надёжного отображения нужной страницы.
+    """
+    doc = await db.get(Document, doc_id)
+    if not doc:
+        raise HTTPException(404, "Document not found")
+
+    try:
+        import fitz, httpx
+        # Переиспользуем shared кэш из products.py
+        from api.products import _pdf_cache, _pdf_cache_max
+
+        pdf_bytes = _pdf_cache.get(doc_id)
+        if pdf_bytes is None:
+            async with httpx.AsyncClient(timeout=60) as c:
+                r = await c.get(doc.file_url)
+                r.raise_for_status()
+                pdf_bytes = r.content
+            if len(_pdf_cache) >= _pdf_cache_max:
+                _pdf_cache.pop(next(iter(_pdf_cache)))
+            _pdf_cache[doc_id] = pdf_bytes
+
+        pdfdoc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        pnum = max(0, min(page_num - 1, len(pdfdoc) - 1))
+        page = pdfdoc[pnum]
+        mat = fitz.Matrix(scale, scale)
+        pix = page.get_pixmap(matrix=mat)
+        img_bytes = pix.tobytes("png")
+        pdfdoc.close()
+
+        return Response(
+            content=img_bytes,
+            media_type="image/png",
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Page render failed: {e}")
 
 
 @router.get("/{doc_id}")

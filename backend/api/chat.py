@@ -266,6 +266,15 @@ async def _catalog_search(q: str, params: dict, db: AsyncSession, limit: int = 1
     return result
 
 
+def _find_attr(attrs: dict, *patterns: str) -> Optional[str]:
+    """Знаходить значення атрибуту за підрядком ключа (без урахування регістру)."""
+    for key, val in attrs.items():
+        kl = key.lower()
+        if any(p.lower() in kl for p in patterns):
+            return str(val)
+    return None
+
+
 def _format_product_for_ai(p: Product, rank: int) -> str:
     """Детальний формат товару для AI контексту."""
     lines = [f"\n[ТОВАР #{rank} | ID:{p.id}]"]
@@ -277,26 +286,29 @@ def _format_product_for_ai(p: Product, rank: int) -> str:
     if p.attributes:
         lines.append("Технічні характеристики:")
         attrs = p.attributes
-        # Show DN/diameter prominently
-        dn = attrs.get("DN") or attrs.get("d_вн_мм")
+        # Гнучкий пошук ключів без прив'язки до конкретних назв
+        dn = _find_attr(attrs, "dn", "d_вн", "внутр", "inner", "nominal", "розмірн")
         if dn:
             lines.append(f"  • DN (внутрішній діаметр): {dn} мм")
-        d_out = attrs.get("d_зовн_мм")
+        d_out = _find_attr(attrs, "зовн", "outer", "d_out", "зовніш")
         if d_out:
             lines.append(f"  • Зовнішній діаметр: {d_out} мм")
-        bar = attrs.get("Тиск_бар") or attrs.get("Тиск") or attrs.get("Робочий")
+        bar = _find_attr(attrs, "тиск", "pressure", "bar", "pn", "робочий")
         if bar:
             lines.append(f"  • Робочий тиск: {bar} bar")
-        t_min = attrs.get("Темп_мін")
-        t_max = attrs.get("Темп_макс") or attrs.get("Температура") or attrs.get("Робоча")
-        if t_min and t_max:
-            lines.append(f"  • Температура: від {t_min}°C до {t_max}°C")
-        elif t_max:
-            lines.append(f"  • Температура: до {t_max}°C")
-        # All other attributes
-        skip = {"DN","d_вн_мм","d_зовн_мм","Тиск_бар","Темп_мін","Темп_макс"}
+        temp = _find_attr(attrs, "темп", "temperature", "температур")
+        if temp:
+            lines.append(f"  • Температура: {temp}")
+        mat = _find_attr(attrs, "матер", "material", "матеріал")
+        if mat:
+            lines.append(f"  • Матеріал: {mat}")
+        # Решта атрибутів
+        shown = {"dn","d_вн","внутр","inner","nominal","розмірн",
+                 "зовн","outer","тиск","pressure","bar","pn","робочий",
+                 "темп","temperature","матер","material"}
         for k, v in attrs.items():
-            if k not in skip:
+            kl = k.lower()
+            if not any(s in kl for s in shown):
                 lines.append(f"  • {k}: {v}")
     if p.certifications:
         lines.append(f"Сертифікати: {p.certifications}")
@@ -393,7 +405,7 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
                 },
                 json={
                     "model": "claude-haiku-4-5-20251001",
-                    "max_tokens": 1200,
+                    "max_tokens": 2000,
                     "system": system,
                     "messages": msgs
                 },

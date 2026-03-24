@@ -61,19 +61,41 @@ async def product_image(product_id: int, db: AsyncSession = Depends(get_db)):
         pdfdoc = fitz.open(stream=pdf_bytes, filetype="pdf")
         page = pdfdoc[min(pnum, len(pdfdoc) - 1)]
 
-        if bbox:
-            # Render specific bbox — product image area
+        # bbox сохранён парсером: используем его напрямую
+        if bbox and isinstance(bbox, dict) and bbox.get('x0') is not None:
             clip = fitz.Rect(
                 bbox["x0"] - 6, bbox["y0"] - 6,
                 bbox["x1"] + 6, bbox["y1"] + 6
             )
             mat = fitz.Matrix(2.5, 2.5)
         else:
-            # No bbox: render full page scaled to thumbnail
-            r = page.rect
-            # Try to find image area heuristically (left portion, skip header)
-            clip = fitz.Rect(0, r.height * 0.08, r.width * 0.52, r.height * 0.65)
-            mat = fitz.Matrix(1.5, 1.5)
+            # bbox не сохранён — ищем наибольшее изображение на странице динамически.
+            # Лого всегда в шапке (y0 < 65), footer ниже 88% высоты.
+            page_h = page.rect.height
+            best_rect = None
+            best_area = 0.0
+            for img in page.get_images(full=True):
+                xref = img[0]
+                try:
+                    for ir in page.get_image_rects(xref):
+                        area = (ir.x1 - ir.x0) * (ir.y1 - ir.y0)
+                        if area >= 500 and ir.y0 >= 65 and ir.y0 < page_h * 0.88 and area > best_area:
+                            best_area = area
+                            best_rect = ir
+                except Exception:
+                    pass
+
+            if best_rect:
+                clip = fitz.Rect(
+                    best_rect.x0 - 6, best_rect.y0 - 6,
+                    best_rect.x1 + 6, best_rect.y1 + 6
+                )
+                mat = fitz.Matrix(2.5, 2.5)
+            else:
+                # Крайний вариант: левая верхняя часть страницы
+                pr = page.rect
+                clip = fitz.Rect(0, pr.height * 0.12, pr.width * 0.52, pr.height * 0.40)
+                mat = fitz.Matrix(1.5, 1.5)
 
         pix = page.get_pixmap(matrix=mat, clip=clip)
         img_bytes = pix.tobytes("png")

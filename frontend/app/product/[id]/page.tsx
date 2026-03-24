@@ -238,11 +238,12 @@ export default function ProductPage() {
       </div>
 
       {/* PDF Modal */}
-      {pdfOpen && pdfUrl && (
+      {pdfOpen && (
         <PdfModal
-          pdfUrl={pdfUrl}
+          docId={p.document_id}
           pageNumber={p.page_number || 1}
           title={p.title}
+          pdfUrl={pdfUrl || undefined}
           onClose={() => setPdfOpen(false)}
         />
       )}

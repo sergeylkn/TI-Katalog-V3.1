@@ -184,7 +184,7 @@ async def rebuild_search_text(background_tasks: BackgroundTasks, db: AsyncSessio
                 # Реконструюємо пошуковий текст
                 attr_values = [str(v) for v in (product.attributes or {}).values() if v]
                 certs = product.certifications or ""
-                search_text = f"{product.title} {product.sku} {' '.join(attr_values)} {certs}".lower()
+                search_text = f"{product.title} {product.sku} {product.description or ''} {' '.join(attr_values)} {certs}".lower()
 
                 if product.search_text != search_text:
                     product.search_text = search_text
@@ -210,6 +210,24 @@ async def rebuild_search_text(background_tasks: BackgroundTasks, db: AsyncSessio
 
     background_tasks.add_task(rebuild_task)
     return {"status": "started", "message": "Search rebuild process initiated"}
+
+@router.post("/rebuild-indexes")
+async def rebuild_indexes(background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
+    """Перебудова таблиці product_indexes з variants/sku всіх товарів."""
+    async def rebuild_task():
+        try:
+            from services.indexer import rebuild_all_indexes
+            logger.info("Rebuilding product indexes...")
+            bus.push({"type": "log", "level": "info", "msg": "Rebuilding product indexes..."})
+            count = await rebuild_all_indexes(db)
+            logger.info(f"Indexes rebuild complete: {count} indexes")
+            bus.push({"type": "log", "level": "done", "msg": f"Indexes rebuild complete: {count} indexes"})
+        except Exception as e:
+            logger.error(f"Error rebuilding indexes: {e}")
+            bus.push({"type": "log", "level": "error", "msg": f"Indexes rebuild failed: {str(e)[:200]}"})
+    background_tasks.add_task(rebuild_task)
+    return {"status": "started", "message": "Indexes rebuild process initiated"}
+
 
 @router.get("/health")
 async def health_check(db: AsyncSession = Depends(get_db)):
