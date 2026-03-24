@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python \"D:/Каталог Тубес AI/tubes-v9/TI-Katalog-V3.1/backend/analyze_pdfs.py\")",
+      "Bash(python3 -c \"import sys; print\\(sys.executable\\)\")",
+      "Bash(where python:*)",
+      "Bash(C:/Users/sergey/AppData/Local/Programs/Python/Python314/python.exe -c \"import fitz; print\\(''fitz ok'', fitz.version\\)\")",
+      "Bash(C:/Users/sergey/AppData/Local/Programs/Python/Python314/python.exe -m pip install pymupdf -q)",
+      "Bash(C:/Users/sergey/AppData/Local/Programs/Python/Python314/python.exe -c \"import fitz; print\\(''ok'', fitz.version\\)\")",
+      "Bash(C:/Users/sergey/AppData/Local/Programs/Python/Python314/python.exe \"D:/Каталог Тубес AI/tubes-v9/analyze_pdfs.py\")",
+      "Bash(C:/Users/sergey/AppData/Local/Programs/Python/Python314/python.exe \"D:/Каталог Тубес AI/tubes-v9/analyze_pdfs2.py\")",
+      "Bash(C:/Users/sergey/AppData/Local/Programs/Python/Python314/python.exe \"D:/Каталог Тубес AI/tubes-v9/test_parser.py\")"
+    ]
+  }
+}

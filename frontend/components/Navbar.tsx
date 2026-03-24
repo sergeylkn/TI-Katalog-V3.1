@@ -116,6 +116,7 @@ export default function Navbar() {
           <button className="theme-btn" onClick={toggleDark}>
             {dark ? '☀️' : '🌙'}
           </button>
+          <Link href="/admin" className="admin-btn" title="Адміністрування">⚙</Link>
         </div>
       </nav>
     </>
