@@ -18,6 +18,9 @@ from services.auth import (
     get_current_admin
 )
 
+# Директорія PDF за замовчуванням (перевизначається змінною середовища)
+_DEFAULT_PDF_CACHE = os.getenv("PDF_CACHE_DIR", r"D:\Каталог Тубес AI\tubes-v9\pdf_cache")
+
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 logger = logging.getLogger("admin_api")
 
@@ -182,6 +185,41 @@ async def get_parse_logs(limit: int = Query(150, le=500), db: AsyncSession = Dep
 async def import_all_pdfs(background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
     """Запуск повного імпорту всіх PDF з R2. Повторно обробляє error/зависші docs."""
     background_tasks.add_task(run_import_all, db)
+    return {"status": "started"}
+
+
+class LocalImportRequest(BaseModel):
+    path: str = ""          # порожньо = використовує _DEFAULT_PDF_CACHE
+    force_reparse: bool = False   # True = перепарсить навіть 'done' документи
+
+
+@router.post("/import-from-local")
+async def import_from_local(req: LocalImportRequest, background_tasks: BackgroundTasks):
+    """Імпорт PDF з локальної директорії (для розробки або повного перепарсингу)."""
+    from services.local_importer import run_local_import
+    pdf_path = req.path.strip() or _DEFAULT_PDF_CACHE
+    background_tasks.add_task(run_local_import, pdf_path, req.force_reparse)
+    return {"status": "started", "path": pdf_path, "force_reparse": req.force_reparse}
+
+
+@router.post("/force-reparse-all")
+async def force_reparse_all(background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
+    """Скидає ВСІ документи в 'pending' і запускає повний перепарсинг з R2."""
+    async def _task():
+        try:
+            stmt = select(Document)
+            docs = (await db.execute(stmt)).scalars().all()
+            for d in docs:
+                d.status = "pending"
+                d.error_msg = None
+            await db.commit()
+            bus.push({"type": "log", "level": "info",
+                      "msg": f"🔄 Скинуто {len(docs)} документів → pending. Починаємо парсинг..."})
+            await run_import_all(db)
+        except Exception as e:
+            bus.push({"type": "log", "level": "error", "msg": f"❌ force-reparse: {str(e)[:200]}"})
+
+    background_tasks.add_task(_task)
     return {"status": "started"}
 
 

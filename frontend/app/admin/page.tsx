@@ -119,6 +119,8 @@ export default function AdminPage() {
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null)
   const [tab, setTab] = useState<'live' | 'history'>('live')
   const [historyLogs, setHistoryLogs] = useState<any[]>([])
+  const [localPath, setLocalPath] = useState('')
+  const [showLocalImport, setShowLocalImport] = useState(false)
 
   const logEndRef = useRef<HTMLDivElement>(null)
   const sseRef = useRef<EventSource | null>(null)
@@ -202,6 +204,20 @@ export default function AdminPage() {
     try {
       await req('/api/admin/import-all-pdfs', { method: 'POST' })
       notify('▶ Імпорт запущено')
+      setTab('live')
+      setLiveLog([])
+      setProgress(null)
+    } catch { notify('❌ Помилка запуску', false) }
+  }
+
+  const doLocalImport = async (force: boolean) => {
+    try {
+      await req('/api/admin/import-from-local', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: localPath.trim(), force_reparse: force }),
+      })
+      notify(force ? '🔄 Повний перепарсинг запущено' : '📁 Локальний імпорт запущено')
       setTab('live')
       setLiveLog([])
       setProgress(null)
@@ -338,9 +354,45 @@ export default function AdminPage() {
               disabled={!!running}
               style={{ padding: '10px 14px', borderRadius: 8, border: 'none', background: running ? '#374151' : '#dc2626', color: running ? '#6b7280' : '#fff', cursor: running ? 'not-allowed' : 'pointer', fontSize: 12, fontWeight: 600, textAlign: 'left' }}
             >
-              ▶ Імпортувати всі PDF
-              <div style={{ fontSize: 10, fontWeight: 400, opacity: .7, marginTop: 2 }}>Нові + повторні помилки</div>
+              ▶ Імпортувати всі PDF (R2)
+              <div style={{ fontSize: 10, fontWeight: 400, opacity: .7, marginTop: 2 }}>Нові + повторні помилки з R2</div>
             </button>
+
+            {/* Local import */}
+            <button
+              onClick={() => setShowLocalImport(!showLocalImport)}
+              style={{ padding: '9px 14px', borderRadius: 8, border: '1px solid #1e3a5f', background: 'rgba(30,58,95,.2)', color: '#7dd3fc', cursor: 'pointer', fontSize: 12, fontWeight: 600, textAlign: 'left' }}
+            >
+              📁 Локальний імпорт (pdf_cache)
+              <div style={{ fontSize: 10, fontWeight: 400, opacity: .7, marginTop: 2 }}>Читає PDF з локальної папки</div>
+            </button>
+
+            {showLocalImport && (
+              <div style={{ background: '#0f172a', borderRadius: 8, padding: 10, border: '1px solid #1e3a5f', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <input
+                  value={localPath}
+                  onChange={(e: { target: { value: string } }) => setLocalPath(e.target.value)}
+                  placeholder="Шлях (порожньо = за замовч.)"
+                  style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid #334155', background: '#1e293b', color: '#e2e8f0', fontSize: 11, fontFamily: 'monospace' }}
+                />
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button
+                    onClick={() => doLocalImport(false)}
+                    disabled={!!running}
+                    style={{ flex: 1, padding: '6px 8px', borderRadius: 6, border: 'none', background: '#1e40af', color: '#fff', cursor: running ? 'not-allowed' : 'pointer', fontSize: 11, fontWeight: 600 }}
+                  >
+                    ▶ Нові PDF
+                  </button>
+                  <button
+                    onClick={() => doLocalImport(true)}
+                    disabled={!!running}
+                    style={{ flex: 1, padding: '6px 8px', borderRadius: 6, border: 'none', background: '#7c3aed', color: '#fff', cursor: running ? 'not-allowed' : 'pointer', fontSize: 11, fontWeight: 600 }}
+                  >
+                    🔄 Всі заново
+                  </button>
+                </div>
+              </div>
+            )}
 
             {(status?.error ?? 0) > 0 && (
               <button

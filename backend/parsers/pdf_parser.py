@@ -661,6 +661,92 @@ def _get_page_main_image_bbox(page: Any) -> Optional[Dict]:
 
 
 # ---------------------------------------------------------------------------
+# Text-scan fallback — для страниц, где таблицы не дали продуктов
+# ---------------------------------------------------------------------------
+
+# Паттерн для извлечения технических параметров из текста
+_DN_RE    = re.compile(r'\bDN\s*(\d+)\b|\b(\d+)\s*(?:мм|mm)\b', re.I)
+_BAR_RE   = re.compile(r'(\d+[\.,]?\d*)\s*(?:bar|бар|MPa|МПа)\b', re.I)
+_TEMP_RE  = re.compile(r'([+-]?\d+)\s*°?\s*C\b', re.I)
+
+def _extract_tech_from_text(text: str) -> dict:
+    """Извлекает DN, bar, temp из произвольного текста страницы."""
+    attrs = {}
+    if m := _DN_RE.search(text):
+        attrs['DN'] = m.group(1) or m.group(2)
+    if m := _BAR_RE.search(text):
+        attrs['Тиск'] = m.group(1).replace(',', '.') + ' bar'
+    if m := _TEMP_RE.search(text):
+        attrs['Температура'] = m.group(1) + '°C'
+    return attrs
+
+
+def _text_scan_fallback(
+    page: Any,
+    page_title: str,
+    page_num: int,
+    page_description: str,
+    page_certifications: str,
+) -> List[Dict]:
+    """
+    Запасной вариант парсинга: ищет SKU-подобные паттерны в ТЕКСТЕ страницы.
+    Используется, когда таблицы не найдены или не распознаны.
+    Возвращает список товаров (может быть пустым).
+    """
+    full_text = page.get_text()
+    if not full_text:
+        return []
+
+    lines = [ln.strip() for ln in full_text.splitlines() if ln.strip()]
+    page_h = page.rect.height
+
+    # Извлекаем технические параметры из всего текста страницы
+    tech_attrs = _extract_tech_from_text(full_text)
+
+    products = []
+    seen: Set[str] = set()
+
+    for i, line in enumerate(lines):
+        # Пропускаем шапку/подвал — строки, которые встречаются на каждой странице
+        if len(line) < 3 or len(line) > 120:
+            continue
+
+        # Ищем все токены строки, похожие на SKU
+        tokens = re.split(r'[\s,;|]+', line)
+        for token in tokens:
+            token = token.strip('.,;:()[]{}/')
+            if not token or not _is_sku(token):
+                continue
+            sku = _clean_sku(token)
+            if sku in seen:
+                continue
+            seen.add(sku)
+
+            # Контекст: берём до 3 строк выше как потенциальный заголовок
+            context_before = lines[max(0, i - 3): i]
+            title_line = ''
+            for ctx in reversed(context_before):
+                # Хороший заголовок: длинная строка без SKU
+                if len(ctx) >= 8 and not _is_sku(ctx.split()[0] if ctx.split() else ''):
+                    title_line = ctx.replace('\n', ' ').strip()
+                    break
+
+            title = title_line or page_title or 'Товар'
+
+            products.append({
+                'title':          title[:256],
+                'sku':            sku[:128],
+                'description':    page_description,
+                'certifications': page_certifications,
+                'attributes':     dict(tech_attrs),
+                'variants':       [],
+                'page_number':    page_num,
+            })
+
+    return products
+
+
+# ---------------------------------------------------------------------------
 # Основная точка входа
 # ---------------------------------------------------------------------------
 
@@ -683,23 +769,21 @@ def parse_pdf(
         for page_num, page in enumerate(pdf, start=1):
             try:
                 page_title = _get_page_title(page)
-                # Определяем главное изображение страницы один раз для всех товаров
                 page_img_bbox = _get_page_main_image_bbox(page)
                 tabs = page.find_tables()
-                # Извлекаем описание и сертификаты со страницы
                 page_description, page_certifications = _get_page_text_and_certs(page, tabs.tables)
+
+                page_products: List[Dict] = []
 
                 for tbl in tabs.tables:
                     rows = tbl.extract()
                     if not rows:
                         continue
 
-                    # Нормализуем: все ячейки приводим к строке и убираем пробелы
                     rows = [[str(c or '').strip() for c in row] for row in rows]
 
                     fmt = _detect_format(rows)
                     if fmt == 'SKIP':
-                        # Диагностика: показываем первые 2 строки пропущенной таблицы
                         preview = ' | '.join(
                             '[' + ', '.join(c[:15] for c in r if c)[:60] + ']'
                             for r in rows[:2]
@@ -714,26 +798,41 @@ def parse_pdf(
                     else:
                         prods = _parse_format_c(rows, page_title, page_num)
 
-                    # Дедупликация между страницами + привязка bbox изображения
-                    for p in prods:
-                        if p['sku'] and p['sku'] in seen_skus:
-                            continue
-                        if p['sku']:
-                            seen_skus.add(p['sku'])
-                        p['section_id'] = section_id
-                        p['category_id'] = category_id
-                        # Сохраняем bbox изображения страницы для endpoint /image
-                        p['image_bbox'] = page_img_bbox or {}
-                        # Заполняем описание и сертификаты (форматные парсеры дают пустые строки)
-                        if not p.get('description'):
-                            p['description'] = page_description
-                        p['certifications'] = page_certifications
-                        all_products.append(p)
+                    page_products.extend(prods)
 
-                    logger.info(
-                        f"Doc#{doc_id} p{page_num} fmt={fmt}: "
-                        f"{len(prods)} товаров, заголовок {rows[0][0][:40]!r}"
+                    if prods:
+                        logger.info(
+                            f"Doc#{doc_id} p{page_num} fmt={fmt}: "
+                            f"{len(prods)} товаров, заголовок {rows[0][0][:40]!r}"
+                        )
+
+                # ── Text-scan fallback: если таблицы не дали продуктов ─────
+                if not page_products:
+                    fallback = _text_scan_fallback(
+                        page, page_title, page_num,
+                        page_description, page_certifications,
                     )
+                    if fallback:
+                        logger.info(
+                            f"Doc#{doc_id} p{page_num} text-scan: "
+                            f"{len(fallback)} товаров (fallback)"
+                        )
+                    page_products.extend(fallback)
+
+                # ── Дедупликация + привязка метаданных ──────────────────────
+                for p in page_products:
+                    if p['sku'] and p['sku'] in seen_skus:
+                        continue
+                    if p['sku']:
+                        seen_skus.add(p['sku'])
+                    p['section_id'] = section_id
+                    p['category_id'] = category_id
+                    p['image_bbox'] = page_img_bbox or {}
+                    if not p.get('description'):
+                        p['description'] = page_description
+                    if not p.get('certifications'):
+                        p['certifications'] = page_certifications
+                    all_products.append(p)
 
             except Exception as exc:
                 logger.warning(f"Doc#{doc_id} p{page_num}: {exc}")
